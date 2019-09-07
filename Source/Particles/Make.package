@@ -10,6 +10,9 @@ CEXE_headers += WarpXParticleContainer.H
 CEXE_headers += RigidInjectedParticleContainer.H
 CEXE_headers += PhysicalParticleContainer.H
 CEXE_headers += ShapeFactors.H
+
+CEXE_sources += PulsarParameters.cpp
+CEXE_headers += PulsarParameters.H
 CEXE_headers += ExternalForce_PM.H
 
 include $(WARPX_HOME)/Source/Particles/Pusher/Make.package
