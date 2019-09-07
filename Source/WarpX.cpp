@@ -24,6 +24,8 @@
 #include <AMReX_AmrMeshInSituBridge.H>
 #endif
 
+#include <PulsarParameters.H>
+
 using namespace amrex;
 
 Vector<Real> WarpX::B_external(3, 0.0);
@@ -590,6 +592,8 @@ WarpX::ReadParameters ()
 
     }
 
+    // initialize Pulsar problem parameters //
+    PulsarParm::Initialize();
 }
 
 // This is a virtual function.
