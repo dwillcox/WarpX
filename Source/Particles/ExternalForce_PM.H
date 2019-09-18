@@ -46,8 +46,8 @@ void ApplyExternalForce(
     // Compute inverse Lorentz factor
     const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux*ux + uy*uy + uz*uz)*inv_c2);
 
-    /* print particle data before fields if pid is pid_verbose_external list */
-    if (PulsarParm::verbose_external && pid == PulsarParm::pid_verbose_external) {
+    /* print particle data before fields if pid is pid_verbose list */
+    if (PulsarParm::verbose && pid == PulsarParm::pid_verbose) {
         amrex::Print() << "***** before ext force *** \n";
         amrex::Print() << " r " << r << "\n";
         amrex::Print() << " theta " << theta << "\n";
@@ -115,8 +115,8 @@ void ApplyExternalForce(
         }
     }
 
-    /* print particle data after fields if pid is pid_verbose_external list */
-    if (PulsarParm::verbose_external && pid == PulsarParm::pid_verbose_external) {
+    /* print particle data after fields if pid is pid_verbose list */
+    if (PulsarParm::verbose && pid == PulsarParm::pid_verbose) {
         amrex::Print() << " **** after ext force **** \n" ;
         amrex::Print() << " Efield " << Ex << " " << Ey << " " << Ez << "\n";
         amrex::Print() << " Bfield " << Bx << " " << By << " " << Bz << "\n";

@@ -15,8 +15,8 @@ namespace PulsarParm
     AMREX_GPU_DEVICE_MANAGED amrex::Real R_star = 10.e3; // radius of NS (m)
     AMREX_GPU_DEVICE_MANAGED amrex::Real B_star = 1.e8; // magnetic field of NS (T)
 
-    AMREX_GPU_DEVICE_MANAGED int verbose_external = 0; // [0/1]: turn on verbosity for external force
-    AMREX_GPU_DEVICE_MANAGED long pid_verbose_external = 0; // print particle properties for this particle ID if verbose_external = 1.
+    AMREX_GPU_DEVICE_MANAGED int verbose = 0; // [0/1]: turn on verbosity for external force
+    AMREX_GPU_DEVICE_MANAGED long pid_verbose = 0; // print particle properties for this particle ID if verbose = 1.
 
     void Initialize()
     {
@@ -33,7 +33,7 @@ namespace PulsarParm
         pp.query("R_star", R_star);
         pp.query("B_star", B_star);
 
-        pp.query("verbose_external", verbose_external);
-        pp.query("pid_verbose_external", pid_verbose_external);
+        pp.query("verbose", verbose);
+        pp.query("pid_verbose", pid_verbose);
     }
 }

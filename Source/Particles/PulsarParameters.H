@@ -17,8 +17,8 @@ namespace PulsarParm
     extern AMREX_GPU_DEVICE_MANAGED amrex::Real R_star;
     extern AMREX_GPU_DEVICE_MANAGED amrex::Real B_star;
 
-    extern AMREX_GPU_DEVICE_MANAGED int verbose_external;
-    extern AMREX_GPU_DEVICE_MANAGED long pid_verbose_external;
+    extern AMREX_GPU_DEVICE_MANAGED int verbose;
+    extern AMREX_GPU_DEVICE_MANAGED long pid_verbose;
 
     void Initialize();
 }
