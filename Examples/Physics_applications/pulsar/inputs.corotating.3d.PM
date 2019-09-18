@@ -1,3 +1,19 @@
+# Description:
+#
+# This inputs file sets up a NS with these properties:
+# - 12km radius
+# - 6283 rad/s angular velocity
+# - 1e8 T magnetic field
+# - B aligned with rotation axis
+# - E = -(omega*R)[cross]B inside the NS
+# - no external fields, no monopole term, no drag force
+#
+# See the "Pulsar Setup" section at the end for the options
+#
+# This also initializes a constant density for electrons and positrons inside the NS.
+#
+# This initializes the electrons and positrons with a corotating momentum function.
+
 #################################
 ####### GENERAL PARAMETERS ######
 #################################
