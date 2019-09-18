@@ -4,6 +4,10 @@ parallel --keep-order --tag "python3 pulsar_plot.py {} $@" ::: `ls -d plt?????`
 
 echo "Finished plotting"
 
-parallel --keep-order --tag "python3 ffmpeg_make_mp4 plt*{}.png -s -ifps 10 -ofps 30 -name {} > /dev/null 2>&1" ::: `cat plot_types.txt`
+for vars in $(cat plot_types.txt);
+    do
+        echo $vars;
+        python3 ffmpeg_make_mp4 plt*$vars.png -s -ifps 10 -ofps 30 -name $vars;
+    done
 
 echo "Finished making movies"
