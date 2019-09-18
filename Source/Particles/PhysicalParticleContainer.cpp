@@ -1617,17 +1617,16 @@ PhysicalParticleContainer::PushPX(WarpXParIter& pti,
             pti.numParticles(),
             [=] AMREX_GPU_DEVICE (long i) {
                 auto& p = particles[i];
-                if (false){
-                    //amrex::Print() << " pid " << p.id() << "\n";
-                    //amrex::Print() << " before mom boris\n";
-                    //amrex::Print() << " position " << x[i] << " ";
-                    //amrex::Print() << y[i] << " " << z[i] << "\n";
-                    //    constexpr amrex::Real inv_c2 = 1./(PhysConst::c*PhysConst::c);
+                if (PulsarParm::verbose && p.id() == PulsarParm::pid_verbose) {
+                    amrex::Print() << " ***** before mom boris pushpx ****\n";
+                    amrex::Print() << " position " << x[i] << " ";
+                    amrex::Print() << y[i] << " " << z[i] << "\n";
+                    constexpr amrex::Real inv_c2 = 1./(PhysConst::c*PhysConst::c);
 
-                    //    // Compute inverse Lorentz factor
-                    //    const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux[i]*ux[i] + uy[i]*uy[i] + uz[i]*uz[i])*inv_c2);
-                    //amrex::Print() << " vel " << ux[i]*inv_gamma << " " << uy[i]*inv_gamma ;
-                    //amrex::Print() << " " << uz[i]*inv_gamma << "\n";
+                    // Compute inverse Lorentz factor
+                    const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux[i]*ux[i] + uy[i]*uy[i] + uz[i]*uz[i])*inv_c2);
+                    amrex::Print() << " vel " << ux[i]*inv_gamma << " " << uy[i]*inv_gamma ;
+                    amrex::Print() << " " << uz[i]*inv_gamma << "\n";
                     amrex::Print() << " EF " << Ex[i];
                     amrex::Print() << " " << Ey[i] << " " << Ez[i] << "\n";
                     amrex::Print() << " Bfield " << Bx[i];
@@ -1637,33 +1636,33 @@ PhysicalParticleContainer::PushPX(WarpXParIter& pti,
                 if (ion_lev){ qp *= ion_lev[i]; }
                 UpdateMomentumBoris( ux[i], uy[i], uz[i], gi[i],
                       Ex[i], Ey[i], Ez[i], Bx[i], By[i], Bz[i], q, m, dt);
-                if (false){
-                        constexpr amrex::Real inv_c2 = 1./(PhysConst::c*PhysConst::c);
+                if (PulsarParm::verbose && p.id() == PulsarParm::pid_verbose) {
+                    constexpr amrex::Real inv_c2 = 1./(PhysConst::c*PhysConst::c);
 
-                        // Compute inverse Lorentz factor
-                        const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux[i]*ux[i] + uy[i]*uy[i] + uz[i]*uz[i])*inv_c2);
-                    amrex::Print() << " *****after mom boris pushpx****\n";
-                    //amrex::Print() << " position " << x[i] << " ";
-                    //amrex::Print() << y[i] << " " << z[i] << "\n";
+                    // Compute inverse Lorentz factor
+                    const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux[i]*ux[i] + uy[i]*uy[i] + uz[i]*uz[i])*inv_c2);
+                    amrex::Print() << " ***** after mom boris pushpx ****\n";
+                    amrex::Print() << " position " << x[i] << " ";
+                    amrex::Print() << y[i] << " " << z[i] << "\n";
                     amrex::Print() << " vel " << ux[i]*inv_gamma << " " << uy[i]*inv_gamma ;
                     amrex::Print() << " " << uz[i]*inv_gamma << "\n";
-                    //amrex::Print() << " EF " << Ex[i];
-                    //amrex::Print() << " " << Ey[i] << " " << Ez[i] << "\n";
+                    amrex::Print() << " EF " << Ex[i];
+                    amrex::Print() << " " << Ey[i] << " " << Ez[i] << "\n";
                 }
                 UpdatePosition( x[i], y[i], z[i],
                       ux[i], uy[i], uz[i], dt );
-                if (false){
+                if (PulsarParm::verbose && p.id() == PulsarParm::pid_verbose) {
                     amrex::Print() << " ***** after update pos pushpx *****\n";
                     amrex::Print() << " position " << x[i] << " ";
                     amrex::Print() << y[i] << " " << z[i] << "\n";
-                    //    constexpr amrex::Real inv_c2 = 1./(PhysConst::c*PhysConst::c);
+                    constexpr amrex::Real inv_c2 = 1./(PhysConst::c*PhysConst::c);
 
-                    //    // Compute inverse Lorentz factor
-                    //    const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux[i]*ux[i] + uy[i]*uy[i] + uz[i]*uz[i])*inv_c2);
-                    //amrex::Print() << " vel " << ux[i]*inv_gamma << " " << uy[i]*inv_gamma ;
-                    //amrex::Print() << " " << uz[i]*inv_gamma << "\n";
-                    //amrex::Print() << " EF " << Ex[i];
-                    //amrex::Print() << " " << Ey[i] << " " << Ez[i] << "\n";
+                    // Compute inverse Lorentz factor
+                    const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux[i]*ux[i] + uy[i]*uy[i] + uz[i]*uz[i])*inv_c2);
+                    amrex::Print() << " vel " << ux[i]*inv_gamma << " " << uy[i]*inv_gamma ;
+                    amrex::Print() << " " << uz[i]*inv_gamma << "\n";
+                    amrex::Print() << " EF " << Ex[i];
+                    amrex::Print() << " " << Ey[i] << " " << Ez[i] << "\n";
                 }
             }
         );
@@ -1803,83 +1802,84 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
                 amrex::ParallelFor( pti.numParticles(),
                     [=] AMREX_GPU_DEVICE (long i) {
                      auto& p = particless[i];
-                     if (false){
-                         //amrex::Print() << " before mom boris\n";
-                         //amrex::Print() << " position " << xp_pm[i] << " ";
-                         //amrex::Print() << yp_pm[i] << " " << zp_pm[i] << "\n";
-                         //constexpr amrex::Real inv_c2 = 1./(PhysConst::c*PhysConst::c);
+                     if (PulsarParm::verbose && p.id() == PulsarParm::pid_verbose) {
+                        amrex::Print() << " ***** before mom boris ****\n";
+                        amrex::Print() << " position " << xp_pm[i] << " ";
+                        amrex::Print() << yp_pm[i] << " " << zp_pm[i] << "\n";
+                        constexpr amrex::Real inv_c2 = 1./(PhysConst::c*PhysConst::c);
 
-                        //// Compute inverse Lorentz factor
-                        //const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux_pm[i]*ux_pm[i] + uy_pm[i]*uy_pm[i] + uz_pm[i]*uz_pm[i])*inv_c2);
-                         //amrex::Print() << " vel " << ux_pm[i]*inv_gamma << " " << uy_pm[i]*inv_gamma ;
-                         //amrex::Print() << " " << uz_pm[i]*inv_gamma << "\n";
-                         amrex::Print() << " Efield " << Expp_pm[i] ;
-                         amrex::Print() << " " << Eypp[i] << " " << Ezpp[i] << "\n";
-                         //amrex::Print() << " Bfield " << Bxpp[i] ;
-                         //amrex::Print() << " " << Bypp_pm[i] << " " << Bzpp_pm[i] << "\n";
-                         //amrex::Print() << " q_pm " << q << "\n";
-                         amrex::Print() << " Bfield " << Bxpp[i];
-                         amrex::Print() << " " << Bypp[i] << " " << Bzpp[i] << "\n";
+                        {
+                            // Compute inverse Lorentz factor
+                            const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux_pm[i]*ux_pm[i] + uy_pm[i]*uy_pm[i] + uz_pm[i]*uz_pm[i])*inv_c2);
+                            amrex::Print() << " vel " << ux_pm[i]*inv_gamma << " " << uy_pm[i]*inv_gamma ;
+                            amrex::Print() << " " << uz_pm[i]*inv_gamma << "\n";
+                            amrex::Print() << " Efield " << Expp_pm[i] ;
+                            amrex::Print() << " " << Eypp[i] << " " << Ezpp[i] << "\n";
+                            amrex::Print() << " Bfield " << Bxpp[i] ;
+                            amrex::Print() << " " << Bypp_pm[i] << " " << Bzpp_pm[i] << "\n";
+                            amrex::Print() << " q_pm " << q << "\n";
+                            amrex::Print() << " Bfield " << Bxpp[i];
+                            amrex::Print() << " " << Bypp[i] << " " << Bzpp[i] << "\n";
+                        }
 
-                         const amrex::Real econst = 0.5*q*dt/m;
+                        const amrex::Real econst = 0.5*q*dt/m;
 
-                         // First half-push for E
-                         amrex::Real ux = 0.0;  ux += econst*Expp_pm[i];
-                         amrex::Real uy = 0.0;  uy += econst*Eypp_pm[i];
-                         amrex::Real uz = 0.0;  uz += econst*Ezpp_pm[i];
-                         amrex::Print() << " my vel 1 " << ux << " " << uy << " " << uz << "\n";
-                         // Compute temporary gamma factor
-                         constexpr amrex::Real inv_c2 = 1./(PhysConst::c*PhysConst::c);
-                         const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux*ux + uy*uy + uz*uz)*inv_c2);
-                         // Magnetic rotation
-                         // - Compute temporary variables
-                         const amrex::Real tx = econst*inv_gamma*Bxpp_pm[i];
-                         const amrex::Real ty = econst*inv_gamma*Bypp_pm[i];
-                         const amrex::Real tz = econst*inv_gamma*Bzpp_pm[i];
-                         const amrex::Real tsqi = 2./(1. + tx*tx + ty*ty + tz*tz);
-                         const amrex::Real sx = tx*tsqi;
-                         const amrex::Real sy = ty*tsqi;
-                         const amrex::Real sz = tz*tsqi;
-                         const amrex::Real ux_p = ux + uy*tz - uz*ty;
-                         const amrex::Real uy_p = uy + uz*tx - ux*tz;
-                         const amrex::Real uz_p = uz + ux*ty - uy*tx;
-                         amrex::Print() << " tx " << tx << " " << ty << " " << tz << "\n";
-                         amrex::Print() << " sx " << sx << " " << sy << " " << sz << "\n";
-                         amrex::Print() << " uxp " << ux_p << " " << uy_p << " " << uz_p << "\n";
-                         // - Update momentum
-                         ux += uy_p*sz - uz_p*sy;
-                         uy += uz_p*sx - ux_p*sz;
-                         uz += ux_p*sy - uy_p*sx;
-                         amrex::Print() << " my vel 2 " << ux << " " << uy << " " << uz << "\n";
-                         amrex::Print() << " epush  " << econst*Expp_pm[i]  ;
-                         amrex::Print() << " " << econst*Eypp_pm[i] << " ";
-                         amrex::Print() << " " << econst*Ezpp_pm[i] << "\n";
-                         // Second half-push for E
-                         ux += econst*Expp_pm[i];
-                         uy += econst*Eypp_pm[i];
-                         uz += econst*Ezpp_pm[i];
-                         amrex::Print() << " my vel 3 " << ux << " " << uy << " " << uz << "\n";
-                         amrex::Real tgaminv = 1./std::sqrt(1. + (ux*ux + uy*uy + uz*uz)*inv_c2);
-                         amrex::Print() << " my vel  " << ux << " " << uy << " " << uz << "\n";
+                        // First half-push for E
+                        amrex::Real ux = 0.0;  ux += econst*Expp_pm[i];
+                        amrex::Real uy = 0.0;  uy += econst*Eypp_pm[i];
+                        amrex::Real uz = 0.0;  uz += econst*Ezpp_pm[i];
+                        amrex::Print() << " my vel 1 " << ux << " " << uy << " " << uz << "\n";
+                        // Compute temporary gamma factor
+                        const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux*ux + uy*uy + uz*uz)*inv_c2);
+                        // Magnetic rotation
+                        // - Compute temporary variables
+                        const amrex::Real tx = econst*inv_gamma*Bxpp_pm[i];
+                        const amrex::Real ty = econst*inv_gamma*Bypp_pm[i];
+                        const amrex::Real tz = econst*inv_gamma*Bzpp_pm[i];
+                        const amrex::Real tsqi = 2./(1. + tx*tx + ty*ty + tz*tz);
+                        const amrex::Real sx = tx*tsqi;
+                        const amrex::Real sy = ty*tsqi;
+                        const amrex::Real sz = tz*tsqi;
+                        const amrex::Real ux_p = ux + uy*tz - uz*ty;
+                        const amrex::Real uy_p = uy + uz*tx - ux*tz;
+                        const amrex::Real uz_p = uz + ux*ty - uy*tx;
+                        amrex::Print() << " tx " << tx << " " << ty << " " << tz << "\n";
+                        amrex::Print() << " sx " << sx << " " << sy << " " << sz << "\n";
+                        amrex::Print() << " uxp " << ux_p << " " << uy_p << " " << uz_p << "\n";
+                        // - Update momentum
+                        ux += uy_p*sz - uz_p*sy;
+                        uy += uz_p*sx - ux_p*sz;
+                        uz += ux_p*sy - uy_p*sx;
+                        amrex::Print() << " my vel 2 " << ux << " " << uy << " " << uz << "\n";
+                        amrex::Print() << " epush  " << econst*Expp_pm[i]  ;
+                        amrex::Print() << " " << econst*Eypp_pm[i] << " ";
+                        amrex::Print() << " " << econst*Ezpp_pm[i] << "\n";
+                        // Second half-push for E
+                        ux += econst*Expp_pm[i];
+                        uy += econst*Eypp_pm[i];
+                        uz += econst*Ezpp_pm[i];
+                        amrex::Print() << " my vel 3 " << ux << " " << uy << " " << uz << "\n";
+                        amrex::Real tgaminv = 1./std::sqrt(1. + (ux*ux + uy*uy + uz*uz)*inv_c2);
+                        amrex::Print() << " my vel  " << ux << " " << uy << " " << uz << "\n";
                      }
                         UpdateMomentumBoris( ux[i], uy[i], uz[i], gi[i],
                               Expp[i], Eypp[i], Ezpp[i], Bxpp[i], Bypp[i], Bzpp[i], q, m, dt);
 
-                     if (false){
-                         //amrex::Print() << " after mom boris\n";
-                         //amrex::Print() << " position " << xp_pm[i] << " ";
-                         //amrex::Print() << yp_pm[i] << " " << zp_pm[i] << "\n";
+                     if (PulsarParm::verbose && p.id() == PulsarParm::pid_verbose) {
+                        amrex::Print() << " ***** after mom boris ****\n";
+                        amrex::Print() << " position " << xp_pm[i] << " ";
+                        amrex::Print() << yp_pm[i] << " " << zp_pm[i] << "\n";
                         constexpr amrex::Real inv_c2 = 1./(PhysConst::c*PhysConst::c);
 
                         // Compute inverse Lorentz factor
                         const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux_pm[i]*ux_pm[i] + uy_pm[i]*uy_pm[i] + uz_pm[i]*uz_pm[i])*inv_c2);
-                         amrex::Print() << " vel " << ux_pm[i]*inv_gamma << " " << uy_pm[i]*inv_gamma ;
-                         amrex::Print() << " " << uz_pm[i]*inv_gamma << "\n";
-                         //amrex::Print() << " Efield " << Expp_pm[i] ;
-                         //amrex::Print() << " " << Eypp_pm[i] << " " << Ezpp_pm[i] << "\n";
-                         //amrex::Print() << " Bfield " << Bxpp_pm[i] ;
-                         //amrex::Print() << " " << Bypp_pm[i] << " " << Bzpp_pm[i] << "\n";
-                         //amrex::Print() << " q_pm " << q << "\n";
+                        amrex::Print() << " vel " << ux_pm[i]*inv_gamma << " " << uy_pm[i]*inv_gamma ;
+                        amrex::Print() << " " << uz_pm[i]*inv_gamma << "\n";
+                        amrex::Print() << " Efield " << Expp_pm[i] ;
+                        amrex::Print() << " " << Eypp_pm[i] << " " << Ezpp_pm[i] << "\n";
+                        amrex::Print() << " Bfield " << Bxpp_pm[i] ;
+                        amrex::Print() << " " << Bypp_pm[i] << " " << Bzpp_pm[i] << "\n";
+                        amrex::Print() << " q_pm " << q << "\n";
                      }
 
                     }
@@ -1888,37 +1888,37 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
                 amrex::ParallelFor( pti.numParticles(),
                     [=] AMREX_GPU_DEVICE (long i) {
                      auto& p = particles[i];
-                     if (false){
-                         amrex::Print() << " before mom vay\n";
-                         amrex::Print() << " position " << xp_pm[i] << " ";
-                         amrex::Print() << yp_pm[i] << " " << zp_pm[i] << "\n";
+                     if (PulsarParm::verbose && p.id() == PulsarParm::pid_verbose) {
+                        amrex::Print() << " ***** before mom vay ****\n";
+                        amrex::Print() << " position " << xp_pm[i] << " ";
+                        amrex::Print() << yp_pm[i] << " " << zp_pm[i] << "\n";
                         constexpr amrex::Real inv_c2 = 1./(PhysConst::c*PhysConst::c);
 
                         // Compute inverse Lorentz factor
                         const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux_pm[i]*ux_pm[i] + uy_pm[i]*uy_pm[i] + uz_pm[i]*uz_pm[i])*inv_c2);
-                         amrex::Print() << " vel " << ux_pm[i]*inv_gamma << " " << uy_pm[i]*inv_gamma ;
-                         amrex::Print() << " " << uz_pm[i]*inv_gamma << "\n";
-                         amrex::Print() << " Efield " << Expp_pm[i] ;
-                         amrex::Print() << " " << Eypp_pm[i] << " " << Ezpp_pm[i] << "\n";
-                         amrex::Print() << " Bfield " << Bxpp_pm[i] ;
-                         amrex::Print() << " " << Bypp_pm[i] << " " << Bzpp_pm[i] << "\n";
+                        amrex::Print() << " vel " << ux_pm[i]*inv_gamma << " " << uy_pm[i]*inv_gamma ;
+                        amrex::Print() << " " << uz_pm[i]*inv_gamma << "\n";
+                        amrex::Print() << " Efield " << Expp_pm[i] ;
+                        amrex::Print() << " " << Eypp_pm[i] << " " << Ezpp_pm[i] << "\n";
+                        amrex::Print() << " Bfield " << Bxpp_pm[i] ;
+                        amrex::Print() << " " << Bypp_pm[i] << " " << Bzpp_pm[i] << "\n";
                      }
                         UpdateMomentumVay( ux[i], uy[i], uz[i], gi[i],
                               Expp[i], Eypp[i], Ezpp[i], Bxpp[i], Bypp[i], Bzpp[i], q, m, dt);
-                     if (false){
-                         amrex::Print() << " before mom vay\n";
-                         amrex::Print() << " position " << xp_pm[i] << " ";
-                         amrex::Print() << yp_pm[i] << " " << zp_pm[i] << "\n";
+                     if (PulsarParm::verbose && p.id() == PulsarParm::pid_verbose) {
+                        amrex::Print() << " ***** after mom vay ****\n";
+                        amrex::Print() << " position " << xp_pm[i] << " ";
+                        amrex::Print() << yp_pm[i] << " " << zp_pm[i] << "\n";
                         constexpr amrex::Real inv_c2 = 1./(PhysConst::c*PhysConst::c);
 
                         // Compute inverse Lorentz factor
                         const amrex::Real inv_gamma = 1./std::sqrt(1. + (ux_pm[i]*ux_pm[i] + uy_pm[i]*uy_pm[i] + uz_pm[i]*uz_pm[i])*inv_c2);
-                         amrex::Print() << " vel " << ux_pm[i]*inv_gamma << " " << uy_pm[i]*inv_gamma ;
-                         amrex::Print() << " " << uz_pm[i]*inv_gamma << "\n";
-                         amrex::Print() << " Efield " << Expp_pm[i] ;
-                         amrex::Print() << " " << Eypp_pm[i] << " " << Ezpp_pm[i] << "\n";
-                         amrex::Print() << " Bfield " << Bxpp_pm[i] ;
-                         amrex::Print() << " " << Bypp_pm[i] << " " << Bzpp_pm[i] << "\n";
+                        amrex::Print() << " vel " << ux_pm[i]*inv_gamma << " " << uy_pm[i]*inv_gamma ;
+                        amrex::Print() << " " << uz_pm[i]*inv_gamma << "\n";
+                        amrex::Print() << " Efield " << Expp_pm[i] ;
+                        amrex::Print() << " " << Eypp_pm[i] << " " << Ezpp_pm[i] << "\n";
+                        amrex::Print() << " Bfield " << Bxpp_pm[i] ;
+                        amrex::Print() << " " << Bypp_pm[i] << " " << Bzpp_pm[i] << "\n";
                      }
                     }
                 );
