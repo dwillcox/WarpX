@@ -1,7 +1,8 @@
 /* Copyright 2019-2020 Andrew Myers, Ann Almgren, Axel Huebl
  * David Grote, Jean-Luc Vay, Luca Fedeli
- * Mathieu Lobet, Maxence Thevenet, Remi Lehe
- * Revathi Jambunathan, Weiqun Zhang, Yinjian Zhao
+ * Mathieu Lobet, Maxence Thevenet, Neil Zaim
+ * Remi Lehe, Revathi Jambunathan, Weiqun Zhang
+ * Yinjian Zhao
  *
  *
  * This file is part of WarpX.
@@ -9,8 +10,14 @@
  * License: BSD-3-Clause-LBNL
  */
 #include "MultiParticleContainer.H"
+#include "SpeciesPhysicalProperties.H"
 #include "Utils/WarpXUtil.H"
 #include "WarpX.H"
+#ifdef WARPX_QED
+    #include "Particles/ElementaryProcess/QEDInternals/SchwingerProcessWrapper.H"
+    #include "Particles/ElementaryProcess/QEDSchwingerProcess.H"
+    #include "Particles/ParticleCreation/FilterCreateTransformFromFAB.H"
+#endif
 
 #include <AMReX_Vector.H>
 
@@ -176,12 +183,12 @@ MultiParticleContainer::ReadParameters ()
 
 
         pp.query("nspecies", nspecies);
-        BL_ASSERT(nspecies >= 0);
+        AMREX_ALWAYS_ASSERT(nspecies >= 0);
 
         if (nspecies > 0) {
             // Get species names
             pp.getarr("species_names", species_names);
-            BL_ASSERT(species_names.size() == nspecies);
+            AMREX_ALWAYS_ASSERT(species_names.size() == nspecies);
 
             // Get species to deposit on main grid
             m_deposit_on_main_grid.resize(nspecies, false);
@@ -189,7 +196,11 @@ MultiParticleContainer::ReadParameters ()
             pp.queryarr("deposit_on_main_grid", tmp);
             for (auto const& name : tmp) {
                 auto it = std::find(species_names.begin(), species_names.end(), name);
-                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(it != species_names.end(), "ERROR: species in particles.deposit_on_main_grid must be part of particles.species_names");
+                WarpXUtilMsg::AlwaysAssert(
+                    it != species_names.end(),
+                    "ERROR: species '" + name
+                    + "' in particles.deposit_on_main_grid must be part of particles.species_names"
+                );
                 int i = std::distance(species_names.begin(), it);
                 m_deposit_on_main_grid[i] = true;
             }
@@ -199,7 +210,11 @@ MultiParticleContainer::ReadParameters ()
             pp.queryarr("gather_from_main_grid", tmp_gather);
             for (auto const& name : tmp_gather) {
                 auto it = std::find(species_names.begin(), species_names.end(), name);
-                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(it != species_names.end(), "ERROR: species in particles.gather_from_main_grid must be part of particles.species_names");
+                WarpXUtilMsg::AlwaysAssert(
+                    it != species_names.end(),
+                    "ERROR: species '" + name
+                    + "' in particles.gather_from_main_grid must be part of particles.species_names"
+                );
                 int i = std::distance(species_names.begin(), it);
                 m_gather_from_main_grid.at(i) = true;
             }
@@ -212,7 +227,11 @@ MultiParticleContainer::ReadParameters ()
             if (!rigid_injected_species.empty()) {
                 for (auto const& name : rigid_injected_species) {
                     auto it = std::find(species_names.begin(), species_names.end(), name);
-                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(it != species_names.end(), "ERROR: species in particles.rigid_injected_species must be part of particles.species_names");
+                    WarpXUtilMsg::AlwaysAssert(
+                        it != species_names.end(),
+                        "ERROR: species '" + name
+                        + "' in particles.rigid_injected_species must be part of particles.species_names"
+                    );
                     int i = std::distance(species_names.begin(), it);
                     species_types[i] = PCTypes::RigidInjected;
                 }
@@ -223,9 +242,11 @@ MultiParticleContainer::ReadParameters ()
             if (!photon_species.empty()) {
                 for (auto const& name : photon_species) {
                     auto it = std::find(species_names.begin(), species_names.end(), name);
-                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    WarpXUtilMsg::AlwaysAssert(
                         it != species_names.end(),
-                        "ERROR: species in particles.rigid_injected_species must be part of particles.species_names");
+                        "ERROR: species '" + name
+                        + "' in particles.rigid_injected_species must be part of particles.species_names"
+                    );
                     int i = std::distance(species_names.begin(), it);
                     species_types[i] = PCTypes::Photon;
                 }
@@ -234,10 +255,10 @@ MultiParticleContainer::ReadParameters ()
             // collision
             ParmParse pc("collisions");
             pc.query("ncollisions", ncollisions);
-            BL_ASSERT(ncollisions >= 0);
+            AMREX_ALWAYS_ASSERT(ncollisions >= 0);
             if (ncollisions > 0) {
                 pc.getarr("collision_names", collision_names);
-                BL_ASSERT(collision_names.size() == ncollisions);
+                AMREX_ALWAYS_ASSERT(collision_names.size() == ncollisions);
             }
 
         }
@@ -247,12 +268,27 @@ MultiParticleContainer::ReadParameters ()
 
         ParmParse ppl("lasers");
         ppl.query("nlasers", nlasers);
-        BL_ASSERT(nlasers >= 0);
+        AMREX_ALWAYS_ASSERT(nlasers >= 0);
         if (nlasers > 0) {
             ppl.getarr("names", lasers_names);
-            BL_ASSERT(lasers_names.size() == nlasers);
+            AMREX_ALWAYS_ASSERT(lasers_names.size() == nlasers);
         }
 
+#ifdef WARPX_QED
+        ParmParse ppw("warpx");
+        ppw.query("do_qed_schwinger", m_do_qed_schwinger);
+
+        if (m_do_qed_schwinger) {
+            ParmParse ppq("qed_schwinger");
+            ppq.get("ele_product_species", m_qed_schwinger_ele_product_name);
+            ppq.get("pos_product_species", m_qed_schwinger_pos_product_name);
+#if (AMREX_SPACEDIM == 2)
+            ppq.get("y_size",m_qed_schwinger_y_size);
+#endif
+            ppq.query("threshold_poisson_gaussian",
+                      m_qed_schwinger_threshold_poisson_gaussian);
+        }
+#endif
         initialized = true;
     }
 }
@@ -277,21 +313,13 @@ MultiParticleContainer::InitData ()
     // This is used for ionization and pair creation processes.
     mapSpeciesProduct();
 
+    CheckIonizationProductSpecies();
+
 #ifdef WARPX_QED
+    CheckQEDProductSpecies();
     InitQED();
 #endif
 
-}
-
-void
-MultiParticleContainer::FieldGather (int lev,
-                                     const MultiFab& Ex, const MultiFab& Ey,
-                                     const MultiFab& Ez, const MultiFab& Bx,
-                                     const MultiFab& By, const MultiFab& Bz)
-{
-    for (auto& pc : allcontainers) {
-        pc->FieldGather(lev, Ex, Ey, Ez, Bx, By, Bz);
-    }
 }
 
 void
@@ -544,19 +572,44 @@ MultiParticleContainer::mapSpeciesProduct ()
         // pc->ionization_product_name and store its ID into
         // pc->ionization_product.
         if (pc->do_field_ionization){
-            int i_product = getSpeciesID(pc->ionization_product_name);
-            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
-                i != i_product,
-                "ERROR: ionization product cannot be the same species");
+            const int i_product = getSpeciesID(pc->ionization_product_name);
             pc->ionization_product = i_product;
         }
+
+#ifdef WARPX_QED
+        if (pc->has_breit_wheeler()){
+            const int i_product_ele = getSpeciesID(
+                pc->m_qed_breit_wheeler_ele_product_name);
+            pc->m_qed_breit_wheeler_ele_product = i_product_ele;
+
+            const int i_product_pos = getSpeciesID(
+                pc->m_qed_breit_wheeler_pos_product_name);
+            pc->m_qed_breit_wheeler_pos_product = i_product_pos;
+        }
+
+        if(pc->has_quantum_sync()){
+            const int i_product_phot = getSpeciesID(
+                pc->m_qed_quantum_sync_phot_product_name);
+            pc->m_qed_quantum_sync_phot_product = i_product_phot;
+        }
+#endif
+
     }
+
+#ifdef WARPX_QED
+    if (m_do_qed_schwinger) {
+    m_qed_schwinger_ele_product =
+        getSpeciesID(m_qed_schwinger_ele_product_name);
+    m_qed_schwinger_pos_product =
+        getSpeciesID(m_qed_schwinger_pos_product_name);
+    }
+#endif
 }
 
 /* \brief Given a species name, return its ID.
  */
 int
-MultiParticleContainer::getSpeciesID (std::string product_str)
+MultiParticleContainer::getSpeciesID (std::string product_str) const
 {
     int i_product;
     bool found = 0;
@@ -569,14 +622,24 @@ MultiParticleContainer::getSpeciesID (std::string product_str)
             i_product = i;
         }
     }
-    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+
+    WarpXUtilMsg::AlwaysAssert(
         found != 0,
-        "ERROR: could not find product species ID for ionization. Wrong name?");
+        "ERROR: could not find the ID of product species '"
+        + product_str + "'" + ". Wrong name?"
+    );
+
     return i_product;
 }
 
 void
-MultiParticleContainer::doFieldIonization ()
+MultiParticleContainer::doFieldIonization (int lev,
+                                           const MultiFab& Ex,
+                                           const MultiFab& Ey,
+                                           const MultiFab& Ez,
+                                           const MultiFab& Bx,
+                                           const MultiFab& By,
+                                           const MultiFab& Bz)
 {
     WARPX_PROFILE("MPC::doFieldIonization");
 
@@ -591,31 +654,31 @@ MultiParticleContainer::doFieldIonization ()
         SmartCopyFactory copy_factory(*pc_source, *pc_product);
         auto phys_pc_ptr = static_cast<PhysicalParticleContainer*>(pc_source.get());
 
-        auto Filter    = phys_pc_ptr->getIonizationFunc();
         auto Copy      = copy_factory.getSmartCopy();
         auto Transform = IonizationTransformFunc();
 
         pc_source ->defineAllParticleTiles();
         pc_product->defineAllParticleTiles();
 
-        for (int lev = 0; lev <= pc_source->finestLevel(); ++lev)
-        {
-            auto info = getMFItInfo(*pc_source, *pc_product);
+        auto info = getMFItInfo(*pc_source, *pc_product);
 
 #ifdef _OPENMP
 #pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif
-            for (MFIter mfi = pc_source->MakeMFIter(lev, info); mfi.isValid(); ++mfi)
-            {
-                auto& src_tile = pc_source ->ParticlesAt(lev, mfi);
-                auto& dst_tile = pc_product->ParticlesAt(lev, mfi);
+        for (WarpXParIter pti(*pc_source, lev, info); pti.isValid(); ++pti)
+        {
+            auto& src_tile = pc_source ->ParticlesAt(lev, pti);
+            auto& dst_tile = pc_product->ParticlesAt(lev, pti);
 
-                auto np_dst = dst_tile.numParticles();
-                auto num_added = filterCopyTransformParticles<1>(dst_tile, src_tile, np_dst,
-                                                                 Filter, Copy, Transform);
+            auto Filter = phys_pc_ptr->getIonizationFunc(pti, lev, Ex.nGrow(),
+                                                         Ex[pti], Ey[pti], Ez[pti],
+                                                         Bx[pti], By[pti], Bz[pti]);
 
-                setNewParticleIDs(dst_tile, np_dst, num_added);
-            }
+            const auto np_dst = dst_tile.numParticles();
+            const auto num_added = filterCopyTransformParticles<1>(dst_tile, src_tile, np_dst,
+                                                                   Filter, Copy, Transform);
+
+            setNewParticleIDs(dst_tile, np_dst, num_added);
         }
     }
 }
@@ -654,23 +717,15 @@ MultiParticleContainer::doCoulombCollisions ()
     }
 }
 
-MFItInfo MultiParticleContainer::getMFItInfo (const WarpXParticleContainer& pc_src,
-                                              const WarpXParticleContainer& pc_dst) const noexcept
+void MultiParticleContainer::CheckIonizationProductSpecies()
 {
-    MFItInfo info;
-
-    if (pc_src.do_tiling && Gpu::notInLaunchRegion()) {
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(pc_dst.do_tiling,
-                                         "For ionization, either all or none of the "
-                                         "particle species must use tiling.");
-        info.EnableTiling(pc_src.tile_size);
+    for (int i=0; i<nspecies; i++){
+        if (allcontainers[i]->do_field_ionization){
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                i != allcontainers[i]->ionization_product,
+                "ERROR: ionization product cannot be the same species");
+        }
     }
-
-#ifdef _OPENMP
-    info.SetDynamic(true);
-#endif
-
-    return info;
 }
 
 #ifdef WARPX_QED
@@ -707,6 +762,17 @@ void MultiParticleContainer::InitQuantumSync ()
 {
     std::string lookup_table_mode;
     ParmParse pp("qed_qs");
+
+    //If specified, use a user-defined energy threshold for photon creaction
+    ParticleReal temp;
+    if(pp.query("photon_creation_energy_threshold", temp)){
+        m_quantum_sync_photon_creation_energy_threshold = temp;
+    }
+    else{
+        amrex::Print() << "Using default value (2*me*c^2)" <<
+            " for photon energy creaction threshold \n" ;
+    }
+
     pp.query("lookup_table_mode", lookup_table_mode);
     if(lookup_table_mode.empty()){
         amrex::Abort("Quantum Synchrotron table mode should be provided");
@@ -958,6 +1024,305 @@ MultiParticleContainer::BreitWheelerGenerateTable ()
         m_shr_p_bw_engine->init_lookup_tables_from_raw_data(table_data);
     }
 }
+
+void
+MultiParticleContainer::doQEDSchwinger ()
+{
+    WARPX_PROFILE("MPC::doQEDSchwinger");
+
+    if (!m_do_qed_schwinger) {return;}
+
+    auto & warpx = WarpX::GetInstance();
+
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(warpx.do_nodal ||
+       warpx.field_gathering_algo == GatheringAlgo::MomentumConserving,
+          "ERROR: Schwinger process only implemented for warpx.do_nodal = 1"
+                                 "or algo.field_gathering = momentum-conserving");
+
+    const int level_0 = 0;
+
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(warpx.maxLevel() == level_0,
+        "ERROR: Schwinger process not implemented with mesh refinement");
+
+#ifdef WARPX_DIM_RZ
+    amrex::Abort("Schwinger process not implemented in rz geometry");
+#endif
+
+#ifdef AMREX_USE_FLOAT
+    amrex::Abort("Schwinger process not implemented in single precision");
+#endif
+
+// Get cell volume multiplied by temporal step. In 2D the transverse size is
+// chosen by the user in the input file.
+    amrex::Geometry const & geom = warpx.Geom(level_0);
+    auto domain_box = geom.Domain();
+#if (AMREX_SPACEDIM == 2)
+    const auto dVdt = geom.CellSize(0) * geom.CellSize(1)
+        * m_qed_schwinger_y_size * warpx.getdt(level_0);
+#elif (AMREX_SPACEDIM == 3)
+    const auto dVdt = geom.CellSize(0) * geom.CellSize(1)
+        * geom.CellSize(2) * warpx.getdt(level_0);
+#endif
+
+    auto& pc_product_ele =
+            allcontainers[m_qed_schwinger_ele_product];
+    auto& pc_product_pos =
+            allcontainers[m_qed_schwinger_pos_product];
+
+    const MultiFab & Ex = warpx.getEfield(level_0,0);
+    const MultiFab & Ey = warpx.getEfield(level_0,1);
+    const MultiFab & Ez = warpx.getEfield(level_0,2);
+    const MultiFab & Bx = warpx.getBfield(level_0,0);
+    const MultiFab & By = warpx.getBfield(level_0,1);
+    const MultiFab & Bz = warpx.getBfield(level_0,2);
+
+    MFItInfo info;
+    if (TilingIfNotGPU()) {
+        info.EnableTiling();
+    }
+#ifdef _OPENMP
+    info.SetDynamic(WarpX::do_dynamic_scheduling);
+#pragma omp parallel
+#endif
+
+    for (MFIter mfi(Ex, info); mfi.isValid(); ++mfi )
+    {
+        // Make the box cell centered to avoid creating particles twice on the tile edges
+        const Box& box = enclosedCells(mfi.nodaltilebox());
+
+        const auto& arrEx = Ex[mfi].array();
+        const auto& arrEy = Ey[mfi].array();
+        const auto& arrEz = Ez[mfi].array();
+        const auto& arrBx = Bx[mfi].array();
+        const auto& arrBy = By[mfi].array();
+        const auto& arrBz = Bz[mfi].array();
+
+        const Array4<const amrex::Real> array_EMFAB [] = {arrEx,arrEy,arrEz,
+                                           arrBx,arrBy,arrBz};
+
+        pc_product_ele->defineAllParticleTiles();
+        pc_product_pos->defineAllParticleTiles();
+
+        auto& dst_ele_tile = pc_product_ele->ParticlesAt(level_0, mfi);
+        auto& dst_pos_tile = pc_product_pos->ParticlesAt(level_0, mfi);
+
+        const auto np_ele_dst = dst_ele_tile.numParticles();
+        const auto np_pos_dst = dst_pos_tile.numParticles();
+
+        const auto Filter  = SchwingerFilterFunc{
+                              m_qed_schwinger_threshold_poisson_gaussian,dVdt};
+
+        const SmartCreateFactory create_factory_ele(*pc_product_ele);
+        const SmartCreateFactory create_factory_pos(*pc_product_pos);
+        const auto CreateEle = create_factory_ele.getSmartCreate();
+        const auto CreatePos = create_factory_pos.getSmartCreate();
+
+        const auto Transform = SchwingerTransformFunc{m_qed_schwinger_y_size,
+                            ParticleStringNames::to_index.find("w")->second};
+
+        const auto num_added = filterCreateTransformFromFAB<1>( dst_ele_tile,
+                              dst_pos_tile, box, array_EMFAB, np_ele_dst,
+                               np_pos_dst,Filter, CreateEle, CreatePos,
+                                Transform);
+
+        setNewParticleIDs(dst_ele_tile, np_ele_dst, num_added);
+        setNewParticleIDs(dst_pos_tile, np_pos_dst, num_added);
+
+    }
+}
+
+void MultiParticleContainer::doQedEvents (int lev,
+                                          const MultiFab& Ex,
+                                          const MultiFab& Ey,
+                                          const MultiFab& Ez,
+                                          const MultiFab& Bx,
+                                          const MultiFab& By,
+                                          const MultiFab& Bz)
+{
+    WARPX_PROFILE("MPC::doQedEvents");
+
+    doQedBreitWheeler(lev, Ex, Ey, Ez, Bx, By, Bz);
+    doQedQuantumSync(lev, Ex, Ey, Ez, Bx, By, Bz);
+}
+
+void MultiParticleContainer::doQedBreitWheeler (int lev,
+                                                const MultiFab& Ex,
+                                                const MultiFab& Ey,
+                                                const MultiFab& Ez,
+                                                const MultiFab& Bx,
+                                                const MultiFab& By,
+                                                const MultiFab& Bz)
+{
+    WARPX_PROFILE("MPC::doQedBreitWheeler");
+
+    // Loop over all species.
+    // Photons undergoing Breit Wheeler process create electrons
+    // in pc_product_ele and positrons in pc_product_pos
+
+    for (auto& pc_source : allcontainers){
+        if(!pc_source->has_breit_wheeler()) continue;
+
+        // Get product species
+        auto& pc_product_ele =
+            allcontainers[pc_source->m_qed_breit_wheeler_ele_product];
+        auto& pc_product_pos =
+            allcontainers[pc_source->m_qed_breit_wheeler_pos_product];
+
+        SmartCopyFactory copy_factory_ele(*pc_source, *pc_product_ele);
+        SmartCopyFactory copy_factory_pos(*pc_source, *pc_product_pos);
+        auto phys_pc_ptr = static_cast<PhysicalParticleContainer*>(pc_source.get());
+
+        const auto Filter  = phys_pc_ptr->getPairGenerationFilterFunc();
+        const auto CopyEle = copy_factory_ele.getSmartCopy();
+        const auto CopyPos = copy_factory_pos.getSmartCopy();
+
+        const auto pair_gen_functor = m_shr_p_bw_engine->build_pair_functor();
+
+        pc_source ->defineAllParticleTiles();
+        pc_product_pos->defineAllParticleTiles();
+        pc_product_ele->defineAllParticleTiles();
+
+        auto info = getMFItInfo(*pc_source, *pc_product_ele, *pc_product_pos);
+
+#ifdef _OPENMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+        for (WarpXParIter pti(*pc_source, lev, info); pti.isValid(); ++pti)
+        {
+            auto Transform = PairGenerationTransformFunc(pair_gen_functor,
+                                                         pti, lev, Ex.nGrow(),
+                                                         Ex[pti], Ey[pti], Ez[pti],
+                                                         Bx[pti], By[pti], Bz[pti],
+                                                         pc_source->get_v_galilean());
+
+            auto& src_tile = pc_source->ParticlesAt(lev, pti);
+            auto& dst_ele_tile = pc_product_ele->ParticlesAt(lev, pti);
+            auto& dst_pos_tile = pc_product_pos->ParticlesAt(lev, pti);
+
+            const auto np_dst_ele = dst_ele_tile.numParticles();
+            const auto np_dst_pos = dst_pos_tile.numParticles();
+            const auto num_added = filterCopyTransformParticles<1>(
+                                                      dst_ele_tile, dst_pos_tile,
+                                                      src_tile, np_dst_ele, np_dst_pos,
+                                                      Filter, CopyEle, CopyPos, Transform);
+
+            setNewParticleIDs(dst_ele_tile, np_dst_ele, num_added);
+            setNewParticleIDs(dst_pos_tile, np_dst_pos, num_added);
+        }
+    }
+}
+
+void MultiParticleContainer::doQedQuantumSync (int lev,
+                                               const MultiFab& Ex,
+                                               const MultiFab& Ey,
+                                               const MultiFab& Ez,
+                                               const MultiFab& Bx,
+                                               const MultiFab& By,
+                                               const MultiFab& Bz)
+{
+    WARPX_PROFILE("MPC::doQedEvents::doQedQuantumSync");
+
+    // Loop over all species.
+    // Electrons or positrons undergoing Quantum photon emission process
+    // create photons in pc_product_phot
+
+    for (auto& pc_source : allcontainers){
+        if(!pc_source->has_quantum_sync()){ continue; }
+
+        // Get product species
+        auto& pc_product_phot =
+            allcontainers[pc_source->m_qed_quantum_sync_phot_product];
+
+        SmartCopyFactory copy_factory_phot(*pc_source, *pc_product_phot);
+        auto phys_pc_ptr =
+            static_cast<PhysicalParticleContainer*>(pc_source.get());
+
+        const auto Filter   = phys_pc_ptr->getPhotonEmissionFilterFunc();
+        const auto CopyPhot = copy_factory_phot.getSmartCopy();
+
+        pc_source ->defineAllParticleTiles();
+        pc_product_phot->defineAllParticleTiles();
+
+        auto info = getMFItInfo(*pc_source, *pc_product_phot);
+
+#ifdef _OPENMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+        for (WarpXParIter pti(*pc_source, lev, info); pti.isValid(); ++pti)
+        {
+            auto Transform = PhotonEmissionTransformFunc(
+                  m_shr_p_qs_engine->build_optical_depth_functor(),
+                  pc_source->particle_runtime_comps["optical_depth_QSR"],
+                  m_shr_p_qs_engine->build_phot_em_functor(),
+                  pti, lev, Ex.nGrow(),
+                  Ex[pti], Ey[pti], Ez[pti],
+                  Bx[pti], By[pti], Bz[pti],
+                  pc_source->get_v_galilean());
+
+            auto& src_tile = pc_source->ParticlesAt(lev, pti);
+            auto& dst_tile = pc_product_phot->ParticlesAt(lev, pti);
+
+            const auto np_dst = dst_tile.numParticles();
+
+            const auto num_added =
+                filterCopyTransformParticles<1>(dst_tile, src_tile, np_dst,
+                                                Filter, CopyPhot, Transform);
+
+            setNewParticleIDs(dst_tile, np_dst, num_added);
+
+            cleanLowEnergyPhotons(
+                                  dst_tile, np_dst, num_added,
+                                  m_quantum_sync_photon_creation_energy_threshold);
+        }
+    }
+}
+
+void MultiParticleContainer::CheckQEDProductSpecies()
+{
+    for (int i=0; i<nspecies; i++){
+        const auto& pc = allcontainers[i];
+        if (pc->has_breit_wheeler()){
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                i != pc->m_qed_breit_wheeler_ele_product,
+                "ERROR: Breit Wheeler product cannot be the same species");
+
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                i != pc->m_qed_breit_wheeler_pos_product,
+                "ERROR: Breit Wheeler product cannot be the same species");
+
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                allcontainers[pc->m_qed_breit_wheeler_ele_product]->
+                    AmIA<PhysicalSpecies::electron>()
+                &&
+                allcontainers[pc->m_qed_breit_wheeler_pos_product]->
+                    AmIA<PhysicalSpecies::positron>(),
+                "ERROR: Breit Wheeler product species are of wrong type");
+        }
+
+        if(pc->has_quantum_sync()){
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                i != pc->m_qed_quantum_sync_phot_product,
+                "ERROR: Quantum Synchrotron product cannot be the same species");
+
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                allcontainers[pc->m_qed_quantum_sync_phot_product]->
+                    AmIA<PhysicalSpecies::photon>(),
+                "ERROR: Quantum Synchrotron product species is of wrong type");
+        }
+    }
+
+    if (m_do_qed_schwinger) {
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                allcontainers[m_qed_schwinger_ele_product]->
+                    AmIA<PhysicalSpecies::electron>()
+                &&
+                allcontainers[m_qed_schwinger_pos_product]->
+                    AmIA<PhysicalSpecies::positron>(),
+                "ERROR: Schwinger process product species are of wrong type");
+    }
+
+}
+
 #endif
 
 #ifdef PULSAR

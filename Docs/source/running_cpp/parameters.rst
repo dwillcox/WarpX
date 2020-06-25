@@ -1,3 +1,5 @@
+.. _running-cpp-parameters:
+
 Input parameters
 ================
 
@@ -5,6 +7,8 @@ Input parameters
 
    This section is currently in development.
 
+
+.. _running-cpp-parameters-overall:
 
 Overall simulation parameters
 -----------------------------
@@ -64,6 +68,8 @@ Overall simulation parameters
     equation. There is no limitation on the timestep in this case, but
     electromagnetic effects (e.g. propagation of radiation, lasers, etc.)
     are not captured.
+
+.. _running-cpp-parameters-box:
 
 Setting up the field mesh
 -------------------------
@@ -130,6 +136,8 @@ Setting up the field mesh
 * ``warpx.n_rz_azimuthal_modes`` (`integer`; 1 by default)
     When using the RZ version, this is the number of azimuthal modes.
 
+.. _running-cpp-parameters-parallelization:
+
 Distribution across MPI ranks and parallelization
 -------------------------------------------------
 
@@ -149,10 +157,10 @@ Distribution across MPI ranks and parallelization
     When using mesh refinement, this number applies to the subdomains
     of the coarsest level, but also to any of the finer level.
 
-* ``warpx.load_balance_int`` (`integer`) optional (default `-1`)
-    How often WarpX should try to redistribute the work across MPI ranks,
-    in order to have better load balancing (expressed in number of PIC cycles
-    inbetween two consecutive attempts at redistributing the work).
+* ``warpx.load_balance_int`` (`string`) optional (default `0`)
+    Using the `Intervals parser`_ syntax, this string defines the timesteps at which
+    WarpX should try to redistribute the work across MPI ranks, in order to have
+    better load balancing.
     Use 0 to disable load_balancing.
 
     When performing load balancing, WarpX measures the wall time for
@@ -167,11 +175,58 @@ Distribution across MPI ranks and parallelization
     perform load-balancing of the simulation.
     If this is `0`: the Knapsack algorithm is used instead.
 
+* ``warpx.load_balance_efficiency_ratio_threshold`` (`float`) optional (default `1.1`)
+    Controls whether to adopt a proposed distribution mapping computed during a load balance.
+    If the the ratio of the proposed to current distribution mapping *efficiency* (i.e.,
+    average cost per MPI process; efficiency is a number in the range [0, 1]) is greater
+    than the threshold value, the proposed distribution mapping is adopted.  The suggested
+    range of values is ``warpx.load_balance_efficiency_ratio_threshold >= 1``, which ensures
+    that the new distribution mapping is adopted only if doing so would improve the load
+    balance efficiency. The higher the threshold value, the more conservative is the criterion
+    for adoption of a proposed distribution; for example, with
+    ``warpx.load_balance_efficiency_ratio_threshold = 1``, the proposed distribution is
+    adopted *any* time the proposed distribution improves load balancing; if instead
+    ``warpx.load_balance_efficiency_ratio_threshold = 2``, the proposed distribution is
+    adopted only if doing so would yield a 100% to the load balance efficiency (with this
+    threshold value, if the  current efficiency is ``0.45``, the new distribution would only be
+    adopted if the proposed efficiency were greater than ``0.9``).
+
+* ``algo.load_balance_costs_update`` (`Heuristic` or `Timers`) optional (default `Timers`)
+    If this is `Heuristic`: load balance costs are updated according to a measure of
+    particles and cells assigned to each box of the domain.  The cost :math:`c` is
+    computed as
+
+    .. math::
+
+            c = n_{\text{particle}} \cdot w_{\text{particle}} + n_{\text{cell}} \cdot w_{\text{cell}},
+
+    where
+    :math:`n_{\text{particle}}` is the number of particles on the box,
+    :math:`w_{\text{particle}}` is the particle cost weight factor (controlled by ``algo.costs_heuristic_particles_wt``),
+    :math:`n_{\text{cell}}` is the number of cells on the box, and
+    :math:`w_{\text{cell}}` is the cell cost weight factor (controlled by ``algo.costs_heuristic_cells_wt``).
+
+    If this is `Timers`: costs are updated according to in-code timers.
+
+* ``algo.costs_heuristic_particles_wt`` (`float`) optional
+    Particle weight factor used in `Heuristic` strategy for costs update; if running on GPU,
+    the particle weight is set to a value determined from single-GPU tests on Summit,
+    depending on the choice of solver (FDTD or PSATD) and order of the particle shape.
+    If running on CPU, the default value is `0.9`.
+
+* ``algo.costs_heuristic_cells_wt`` (`float`) optional
+    Cell weight factor used in `Heuristic` strategy for costs update; if running on GPU,
+    the cell weight is set to a value determined from single-GPU tests on Summit,
+    depending on the choice of solver (FDTD or PSATD) and order of the particle shape.
+    If running on CPU, the default value is `0.1`.
+
 * ``warpx.do_dynamic_scheduling`` (`0` or `1`) optional (default `1`)
     Whether to activate OpenMP dynamic scheduling.
 
 * ``warpx.safe_guard_cells`` (`0` or `1`) optional (default `0`)
     For developers: run in safe mode, exchanging more guard cells, and more often in the PIC loop (for debugging).
+
+.. _running-cpp-parameters-parser:
 
 Math parser and user-defined constants
 --------------------------------------
@@ -194,6 +249,8 @@ For example, parameters ``a0`` and ``z_plateau`` can be specified with:
 
 * ``my_constants.a0 = 3.0``
 * ``my_constants.z_plateau = 150.e-6``
+
+.. _running-cpp-parameters-particle:
 
 Particle initialization
 -----------------------
@@ -225,10 +282,18 @@ Particle initialization
 * ``<species_name>.charge`` (`float`) optional (default `NaN`)
     The charge of one `physical` particle of this species.
     If ``species_type`` is specified, the charge will be set to the physical value and ``charge`` is optional.
+    When ``<species>.do_field_ionization = 1``, the physical particle charge is equal to ``ionization_initial_level * charge``, so latter parameter should be equal to q_e (which is defined in WarpX as the elementary charge in coulombs).
 
 * ``<species_name>.mass`` (`float`) optional (default `NaN`)
     The mass of one `physical` particle of this species.
     If ``species_type`` is specified, the mass will be set to the physical value and ``mass`` is optional.
+
+* ``<species_name>.xmin,ymin,zmin`` (`float`) optional (default unlimited)
+    When ``<species_name>.xmin`` and ``<species_name>.xmax`` (see below) are set, they delimit the region within which particles are injected.
+    The same is applicable in the other directions.
+    If periodic boundary conditions are used in direction ``i``, then the default (i.e. if the range is not specified) range will be the simulation box, ``[geometry.prob_hi[i], geometry.prob_lo[i]]``.
+
+* ``<species_name>.xmax,ymax,zmax`` (`float`) optional (default unlimited)
 
 * ``<species_name>.injection_style`` (`string`)
     Determines how the particles will be injected in the simulation.
@@ -240,18 +305,40 @@ Particle initialization
     * ``NRandomPerCell``: injection with a fixed number of randomly-distributed particles per cell.
       This requires the additional parameter ``<species_name>.num_particles_per_cell``.
 
+    * ``SingleParticle``: Inject a single macroparticle.
+      This requires the additional parameters:
+      ``<species_name>.single_particle_pos`` (`3 doubles`, particle 3D position [meter])
+      ``<species_name>.single_particle_vel`` (`3 doubles`, particle 3D normalized momentum, i.e. :math:`\gamma \beta`)
+      ``<species_name>.single_particle_weight`` ( `double`, macroparticle weight, i.e. number of physical particles it represents)
+
     * ``gaussian_beam``: Inject particle beam with gaussian distribution in
       space in all directions. This requires additional parameters:
-      ``<species_name>.q_tot`` (beam charge),
+      ``<species_name>.q_tot`` (beam charge) optional (default is ``q_tot=0``),
       ``<species_name>.npart`` (number of particles in the beam),
       ``<species_name>.x/y/z_m`` (average position in `x/y/z`),
       ``<species_name>.x/y/z_rms`` (standard deviation in `x/y/z`),
+      ``<species_name>.x/y/z_rms`` (standard deviation in `x/y/z`),
+      ``<species_name>.x/y/z_cut`` (optional, particles with ``abs(x-x_m) > x_cut*x_rms`` are not injected, same for y and z. ``<species_name>.q_tot`` is the charge of the un-cut beam, so that cutting the distribution is likely to result in a lower total charge),
       and optional argument ``<species_name>.do_symmetrize`` (whether to
       symmetrize the beam in the x and y directions).
 
+    * ``external_file``: Inject macroparticles with properties (mass, charge, position, and momentum - :math:`\gamma \beta m c`) read from an external openPMD file.
+      With it users can specify the additional arguments:
+      ``<species_name>.injection_file`` (`string`) openPMD file name and
+      ``<species_name>.q_tot`` (`double`) optional (default is ``q_tot=0`` and no re-scaling is done, ``weight=q_p``) when specified it is used to re-scale the weight of externally loaded ``N`` physical particles, each of charge ``q_p``, to inject macroparticles of ``weight=<species_name>.q_tot/q_p/N``.
+      ``<species_name>.charge`` (`double`) optional (default is read from openPMD file) when set this will be the charge of the physical particle represented by the injected macroparticles.
+      ``<species_name>.mass`` (`double`) optional (default is read from openPMD file) when set this will be the charge of the physical particle represented by the injected macroparticles.
+      ``<species_name>.z_shift`` (`double`) optional (default is no shift) when set this value will be added to the longitudinal, ``z``, position of the particles.
+      The external file must include the species ``openPMD::Record``s labeled ``position`` and ``momentum`` (`double` arrays), with dimensionality and units set via ``openPMD::setUnitDimension`` and ``setUnitSI``.
+      If the external file also contains ``openPMD::Records``s for ``mass`` and ``charge`` (constant `double` scalars) then the species will use these, unless overwritten in the input file (see ``<species_name>.mass``, ```<species_name>.charge`` or ```<species_name>.species_type``).
+      The ``external_file`` option is currently implemented for 2D and 3D geometries, with record components ``x``, ``z`` and ``y`` for 3D.
+      For more information on the `openPMD format <https://github.com/openPMD>`__ and how to build WarpX with it, please visit :doc:`../building/openpmd`.
+
 * ``<species_name>.num_particles_per_cell_each_dim`` (`3 integers in 3D and RZ, 2 integers in 2D`)
     With the NUniformPerCell injection style, this specifies the number of particles along each axis
-    within a cell. Note that for RZ, the three axis are radius, theta, and z.
+    within a cell. Note that for RZ, the three axis are radius, theta, and z and that the recommended
+    number of particles per theta is at least two times the number of azimuthal modes requested.
+    (It is recommended to do a convergence scan of the number of particles per theta)
 
 * ``<species_name>.do_continuous_injection`` (`0` or `1`)
     Whether to inject particles during the simulation, and not only at
@@ -261,6 +348,7 @@ Particle initialization
 * ``<species_name>.initialize_self_fields`` (`0` or `1`)
     Whether to calculate the space-charge fields associated with this species
     at the beginning of the simulation.
+    The fields are calculated for the mean gamma of the species.
 
 * ``<species_name>.self_fields_required_precision`` (`float`, default: 1.e-11)
     The relative precision with which the initial space-charge fields should
@@ -281,7 +369,7 @@ Particle initialization
       It requires additional argument ``<species_name>.density_function(x,y,z)``, which is a
       mathematical expression for the density of the species, e.g.
       ``electrons.density_function(x,y,z) = "n0+n0*x**2*1.e12"`` where ``n0`` is a
-      user-defined constant, see above.
+      user-defined constant, see above. WARNING: where ``density_function(x,y,z)`` is close to zero, particles will still be injected between ``xmin`` and ``xmax`` etc., with a null weight. This is undesirable because it results in useless computing. To avoid this, see option ``density_min`` below.
 
 * ``<species_name>.density_min`` (`float`) optional (default `0.`)
     Minimum plasma density. No particle is injected where the density is below
@@ -424,22 +512,6 @@ Particle initialization
     If `1` is given, this species will not be pushed
     by any pusher during the simulation.
 
-* ``<species>.plot_species`` (`0` or `1` optional; default `1`)
-    Whether to plot particle quantities for this species.
-
-* ``<species>.plot_vars`` (list of `strings` separated by spaces, optional)
-    List of particle quantities to write to `plotfiles`. By defaults, all
-    quantities are written to file. Choices are
-
-    * ``w`` for the particle weight,
-    * ``ux`` ``uy`` ``uz`` for the particle momentum,
-    * ``Ex`` ``Ey`` ``Ez`` for the electric field on particles,
-    * ``Bx`` ``By`` ``Bz`` for the magnetic field on particles.
-
-    The particle positions are always included. Use
-    ``<species>.plot_vars = none`` to plot no particle data, except
-    particle position.
-
 * ``<species>.do_back_transformed_diagnostics`` (`0` or `1` optional, default `1`)
     Only used when ``warpx.do_back_transformed_diagnostics=1``. When running in a
     boosted frame, whether or not to plot back-transformed diagnostics for
@@ -449,12 +521,12 @@ Particle initialization
     Whether or not to use OpenMP threading for particle initialization.
 
 * ``<species>.do_field_ionization`` (`0` or `1`) optional (default `0`)
-    Do field ionization for this species (using the ADK theory). Currently,
-    this is slow on GPU.
+    Do field ionization for this species (using the ADK theory).
 
 * ``<species>.physical_element`` (`string`)
     Only read if `do_field_ionization = 1`. Symbol of chemical element for
     this species. Example: for Helium, use ``physical_element = He``.
+    Elements up to atomic number Z=86 (Radon) are supported, let us know if you need higher Z.
 
 * ``<species>.ionization_product_species`` (`string`)
     Only read if `do_field_ionization = 1`. Name of species in which ionized
@@ -474,20 +546,38 @@ Particle initialization
 * ``<species>.do_qed`` (`int`) optional (default `0`)
     If `<species>.do_qed = 0` all the QED effects are disabled for this species.
     If `<species>.do_qed = 1` QED effects can be enabled for this species (see below).
-    **Implementation of this feature is in progress. It requires to compile with QED=TRUE**
+    **Implementation of this feature is in progress. It requires `picsar` on the `QED` branch and to compile with QED=TRUE**
 
 * ``<species>.do_qed_quantum_sync`` (`int`) optional (default `0`)
     It only works if `<species>.do_qed = 1`. Enables Quantum synchrotron emission for this species.
     Quantum synchrotron lookup table should be either generated or loaded from disk to enable
     this process (see "Lookup tables for QED modules" section below).
-    **Implementation of this feature is in progress. It requires to compile with QED=TRUE**
+    `<species>` must be either an electron or a positron species.
+    **Implementation of this feature is in progress. It requires `picsar` on the `QED` branch and to compile with QED=TRUE**
 
 * ``<species>.do_qed_breit_wheeler`` (`int`) optional (default `0`)
     It only works if `<species>.do_qed = 1`. Enables non-linear Breit-Wheeler process for this species.
     Breit-Wheeler lookup table should be either generated or loaded from disk to enable
     this process (see "Lookup tables for QED modules" section below).
-    **Implementation of this feature is in progress. It requires to compile with QED=TRUE**
+    `<species>` must be a photon species.
+    **Implementation of this feature is in progress. It requires `picsar` on the `QED` branch and to compile with QED=TRUE**
 
+* ``<species>.qed_quantum_sync_phot_product_species`` (`string`)
+    If an electron or a positron species has the Quantum synchrotron process, a photon product species must be specified
+    (the name of an existing photon species must be provided)
+    **Implementation of this feature is in progress. It requires `picsar` on the `QED` branch and to compile with QED=TRUE**
+
+* ``<species>.qed_breit_wheeler_ele_product_species`` (`string`)
+    If a photon species has the Breit-Wheeler process, an electron product species must be specified
+    (the name of an existing electron species must be provided)
+    **Implementation of this feature is in progress. It requires `picsar` on the `QED` branch and to compile with QED=TRUE**
+
+* ``<species>.qed_breit_wheeler_pos_product_species`` (`string`)
+    If a photon species has the Breit-Wheeler process, a positron product species must be specified
+    (the name of an existing positron species must be provided).
+    **Implementation of this feature is in progress. It requires `picsar` on the `QED` branch and to compile with QED=TRUE**
+
+.. _running-cpp-parameters-laser:
 
 Laser initialization
 --------------------
@@ -809,6 +899,8 @@ Laser initialization
     B-field to each particle which is then added to the field values gathered
     from the grid in the PIC cycle.
 
+.. _running-cpp-parameters-collision:
+
 Collision initialization
 ------------------------
 
@@ -836,6 +928,8 @@ following the algorithm given by `Perez et al. (Phys. Plasmas 19, 083104, 2012) 
     ``<collision_name>``.
     If this is not provided, or if a non-positive value is provided,
     a Coulomb logarithm will be computed automatically according to the algorithm.
+
+.. _running-cpp-parameters-numerics:
 
 Numerics and algorithms
 -----------------------
@@ -903,6 +997,25 @@ Numerics and algorithms
 
      If ``algo.maxwell_fdtd_solver`` is not specified, ``yee`` is the default.
 
+* ``algo.em_solver_medium`` (`string`, optional)
+    The medium for evaluating the Maxwell solver. Available options are :
+
+    - ``vacuum``: vacuum properties are used in the Maxwell solver.
+    - ``macroscopic``: macroscopic Maxwell equation is evaluated. If this option is selected, then the corresponding properties of the medium must be provided using ``macroscopic.sigma``, ``macroscopic.epsilon``, and ``macroscopic.mu``.
+
+    If ``algo.em_solver_medium`` is not specified, ``vacuum`` is the default.
+
+* ``algo.macroscopic_sigma_method`` (`string`, optional)
+    The algorithm for updating electric field when ``algo.em_solver_medium`` is macroscopic. Available options are:
+
+    - ``backwardeuler`` is a fully-implicit, first-order in time scheme for E-update (default).
+    - ``laxwendroff`` is the semi-implicit, second order in time scheme for E-update.
+    Comparing the two methods, Lax-Wendroff is more prone to developing oscillations and requires a smaller timestep for stability. On the other hand, Backward Euler is more robust but it is first-order accurate in time compared to the second-order Lax-Wendroff method.
+
+* ``macroscopic.sigma``, ``macroscopic.epsilon``, ``macroscopic.mu`` (`double`)
+    The conductivity, permittivity, and permeability of the computational medium, respectively.
+    If ``algo.em_solver_medium`` is set to macroscopic, then these properties must be provided.
+
 * ``interpolation.nox``, ``interpolation.noy``, ``interpolation.noz`` (`integer`)
     The order of the shape factors for the macroparticles, for the 3 dimensions of space.
     Lower-order shape factors result in faster simulations, but more noisy results,
@@ -940,17 +1053,17 @@ Numerics and algorithms
 * ``psatd.nox``, ``psatd.noy``, ``pstad.noz`` (`integer`) optional (default `16` for all)
     The order of accuracy of the spatial derivatives, when using the code compiled with a PSATD solver.
 
-* ``psatd.hybrid_mpi_decomposition`` (`0` or `1`; default: 0)
-    Whether to use a different MPI decomposition for the particle-grid operations
-    (deposition and gather) and for the PSATD solver. If `1`, the FFT will
-    be performed over MPI groups.
+* ``psatd.nx_guard`, ``psatd.ny_guard``, ``psatd.nz_guard`` (`integer`) optional
+    The number of guard cells to use with PSATD solver.
+    If not set by users, these values are calculated automatically and determined *empirically* and
+    would be equal the order of the solver for nodal grid, and half the order of the solver for staggered.
 
-* ``psatd.ngroups_fft`` (`integer`)
-    The number of MPI groups that are created for the FFT, when using the code compiled with a PSATD solver
-    (and only if `hybrid_mpi_decomposition` is `1`).
-    The FFTs are global within one MPI group and use guard cell exchanges in between MPI groups.
-    (If ``ngroups_fft`` is larger than the number of MPI ranks used,
-    than the actual number of MPI ranks is used instead.)
+* ``psatd.periodic_single_box_fft`` (`0` or `1`; default: 0)
+    If true, this will *not* incorporate the guard cells into the box over which FFTs are performed.
+    This is only valid when WarpX is run with periodic boundaries and a single box.
+    In this case, using `psatd.periodic_single_box_fft` is equivalent to using a global FFT over the whole domain.
+    Therefore, all the approximations that are usually made when using local FFTs with guard cells
+    (for problems with multiple boxes) become exact in the case of the periodic, single-box FFT without guard cells.
 
 * ``psatd.fftw_plan_measure`` (`0` or `1`)
     Defines whether the parameters of FFTW plans will be initialized by
@@ -959,6 +1072,11 @@ Numerics and algorithms
     plans will simply be estimated (``FFTW_ESTIMATE`` mode).
     See `this section of the FFTW documentation <http://www.fftw.org/fftw3_doc/Planner-Flags.html>`__
     for more information.
+
+* ``psatd.do_current_correction`` (`0` or `1`; default: `0`)
+    If true, the current correction defined by equation (19) of
+    `(Vay et al, JCP 243, 2013) <https://doi.org/10.1016/j.jcp.2013.03.010>`_ is applied.
+    Only used when compiled and running with the PSATD solver.
 
 * ``pstad.v_galilean`` (`3 floats`, in units of the speed of light; default `0. 0. 0.`)
     Defines the galilean velocity.
@@ -969,12 +1087,12 @@ Numerics and algorithms
     It also requires the use of the `direct` current deposition option
     `algo.current_deposition = direct` (does not work with Esirkepov algorithm).
 
-* ``warpx.override_sync_int`` (`integer`) optional (default `10`)
-    Number of time steps between synchronization of sources (`rho` and `J`) on
-    grid nodes at box boundaries. Since the grid nodes at the interface between
-    two neighbor boxes are duplicated in both boxes, an instability can occur
-    if they have too different values. This option makes sure that they are
-    synchronized periodically.
+* ``warpx.override_sync_int`` (`string`) optional (default `1`)
+    Using the `Intervals parser`_ syntax, this string defines the timesteps at which
+    synchronization of sources (`rho` and `J`) on grid nodes at box boundaries is performed.
+    Since the grid nodes at the interface between two neighbor boxes are duplicated in both
+    boxes, an instability can occur if they have too different values.
+    This option makes sure that they are synchronized periodically.
 
 * ``warpx.use_hybrid_QED`` ('bool'; default: 0)
     Will use the Hybird QED Maxwell solver when pushing fields: a QED correction is added to the
@@ -992,13 +1110,17 @@ Numerics and algorithms
     When running in an accelerated platform, whether to call a deviceSynchronize around profiling regions.
     This allows the profiler to give meaningful timers, but (hardly) slows down the simulation.
 
- * ``warpx.sort_int`` (`int`) optional (defaults: ``-1`` on CPU; ``4`` on GPU)
-     If ``<=0``, do not sort particles. If ``>0``, sort particles by bin every ``sort_int`` iteration.
+ * ``warpx.sort_int`` (`string`) optional (defaults: ``-1`` on CPU; ``4`` on GPU)
+     Using the `Intervals parser`_ syntax, this string defines the timesteps at which particles are
+     sorted by bin.
+     If ``<=0``, do not sort particles.
      It is turned on on GPUs for performance reasons (to improve memory locality).
 
  * ``warpx.sort_bin_size`` (list of `int`) optional (default ``4 4 4``)
-     If ``sort_int > 0`` particles are sorted in bins of ``sort_bin_size`` cells.
+     If ``sort_int`` is activated particles are sorted in bins of ``sort_bin_size`` cells.
      In 2D, only the first two elements are read.
+
+.. _running-cpp-parameters-boundary:
 
 Boundary conditions
 -------------------
@@ -1008,7 +1130,7 @@ Boundary conditions
     and around the refinement patches. See the section :doc:`../../theory/PML`
     for more details.
 
-* ``warpx.pml_ncells`` (`int`; default: 10)
+* ``warpx.pml_ncell`` (`int`; default: 10)
     The depth of the PML, in number of cells.
 
 * ``warpx.pml_delta`` (`int`; default: 10)
@@ -1033,24 +1155,160 @@ Boundary conditions
 * ``warpx.do_pml_Hi`` (`2 floats in 2D`, `3 floats in 3D`; default: `1 1 1`)
     The directions along which one wants a pml boundary condition for upper boundaries on mother grid.
 
+.. _running-cpp-parameters-diagnostics:
+
 Diagnostics and output
 ----------------------
 
-* ``amr.plot_int`` (`integer`) optional
-    The number of PIC cycles (interval) in between two consecutive `plotfile` data dumps.
-    Use a negative number to disable data dumping.
-    This is ``-1`` (disabled) by default.
+In-situ visualization
+^^^^^^^^^^^^^^^^^^^^^
 
-* ``warpx.openpmd_int`` (`integer`) optional
-    The number of PIC cycles (interval) in between two consecutive `openPMD <https://www.openPMD.org>`_ data dumps.
-    Requires to build WarpX with ``USE_OPENPMD=TRUE`` (see :ref:`instructions <building-openpmd>`).
-    This is ``-1`` (disabled) by default.
+WarpX has three types of diagnostics:
+``FullDiagnostics`` consist in dumps of fields and particles at given iterations,
+``BackTransformedDiagnostics`` are used when running a simulation in a boosted frame, to reconstruct output data to the lab frame, and
+``ReducedDiags`` allow the user to compute some reduced quantity (particle temperature, max of a field) and write a small amount of data to text files.
+Similar to what is done for physical species, WarpX has a class Diagnostics that allows users to initialize different diagnostics, each of them with different fields, resolution and period.
+This currently applies to standard diagnostics, but should be extended to back-transformed diagnostics and reduced diagnostics (and others) in a near future.
 
-* ``warpx.openpmd_backend`` (``bp``, ``h5`` or ``json``) optional
+Full Diagnostics
+^^^^^^^^^^^^^^^^
+
+``FullDiagnostics`` consist in dumps of fields and particles at given iterations.
+Similar to what is done for physical species, WarpX has a class Diagnostics that allows users to initialize different diagnostics, each of them with different fields, resolution and period.
+The user specifies the number of diagnostics and the name of each of them, and then specifies options for each of them separately.
+Note that some parameter (those that do not start with a ``<diag_name>.`` prefix) apply to all diagnostics.
+This should be changed in the future.
+In-situ capabilities can be used by turning on Sensei or Ascent (provided they are installed) through the output format, see below.
+
+* ``diagnostics.diags_names`` (list of `string` optional, default `empty`)
+    Name of each diagnostics.
+    example: ``diagnostics.diags_names = diag1 my_second_diag``.
+
+* ``<diag_name>.period`` (`string` optional, default `0`)
+    Using the `Intervals parser`_ syntax, this string defines the timesteps at which data is dumped.
+    Use a negative number or 0 to disable data dumping.
+    This is ``0`` (disabled) by default.
+    example: ``diag1.period = 10,20:25:1``.
+
+* ``<diag_name>.diag_type`` (`string`)
+    Type of diagnostics. So far, only ``Full`` is supported.
+    example: ``diag1.diag_type = Full``.
+
+* ``<diag_name>.format`` (`string` optional, default ``plotfile``)
+    Flush format. Possible values are:
+
+    * ``plotfile`` for native AMReX format.
+
+    * ``checkpoint`` for a checkpoint file, only wirks with ``<diag_name>.diag_type = Full``.
+
+    * ``openpmd`` for OpenPMD format `openPMD <https://www.openPMD.org>`_.
+      Requires to build WarpX with ``USE_OPENPMD=TRUE`` (see :ref:`instructions <building-openpmd>`).
+
+    * ``ascent`` for in-situ visualization using Ascent.
+
+    * ``sensei`` for in-situ visualization using Sensei.
+
+    example: ``diag1.format = openpmd``.
+
+* ``<diag_name>.sensei_config`` (`string`)
+  Only read if ``<diag_name>.format = sensei``.
+  Points to the SENSEI XML file which selects and configures the desired back end.
+
+* ``<diag_name>.sensei_pin_mesh`` (`integer`; 0 by default)
+  Only read if ``<diag_name>.format = sensei``.
+  When 1 lower left corner of the mesh is pinned to 0.,0.,0.
+
+* ``<diag_name>.openpmd_backend`` (``bp``, ``h5`` or ``json``) optional, only used if ``<diag_name>.format = openpmd``
     `I/O backend <https://openpmd-api.readthedocs.io/en/latest/backends/overview.html>`_ for `openPMD <https://www.openPMD.org>`_ data dumps.
     ``bp`` is the `ADIOS I/O library <https://csmd.ornl.gov/adios>`_, ``h5`` is the `HDF5 format <https://www.hdfgroup.org/solutions/hdf5/>`_, and ``json`` is a `simple text format <https://en.wikipedia.org/wiki/JSON>`_.
     ``json`` only works with serial/single-rank jobs.
     When WarpX is compiled with openPMD support, the first available backend in the order given above is taken.
+
+* ``<diag_name>.openpmd_tspf`` (`bool`, optional, default ``true``) only read if ``<diag_name>.format = openpmd``.
+    Whether to write one file per timestep.
+
+* ``<diag_name>.fields_to_plot`` (list of `strings`, optional)
+    Fields written to plotfiles. Possible values: ``Ex`` ``Ey`` ``Ez``
+    ``Bx`` ``By`` ``Bz`` ``jx`` ``jy`` ``jz`` ``part_per_cell`` ``rho``
+    ``F`` ``part_per_grid`` ``part_per_proc`` ``divE`` ``divB``.
+    Default is ``<diag_name>.fields_to_plot = Ex Ey Ez Bx By Bz jx jy jz``.
+
+* ``<diag_name>.plot_raw_fields`` (`0` or `1`) optional (default `0`)
+    By default, the fields written in the plot files are averaged on the nodes.
+    When ```warpx.plot_raw_fields`` is `1`, then the raw (i.e. unaveraged)
+    fields are also saved in the output files.
+    Only works with ``<diag_name>.format = plotfile``.
+    See `this section <https://yt-project.org/doc/examining/loading_data.html#viewing-raw-fields-in-warpx>`_
+    in the yt documentation for more details on how to view raw fields.
+
+* ``<diag_name>.plot_raw_fields_guards`` (`0` or `1`) optional (default `0`)
+    Only used when ``warpx.plot_raw_fields`` is ``1``.
+    Whether to include the guard cells in the output of the raw fields.
+    Only works with ``<diag_name>.format = plotfile``.
+
+* ``<diag_name>.plot_finepatch`` (`0` or `1`) optional (default `0`)
+    Only used when mesh refinement is activated and ``warpx.plot_raw_fields`` is ``1``.
+    Whether to output the data of the fine patch, in the plot files.
+    Only works with ``<diag_name>.format = plotfile``.
+
+* ``<diag_name>.plot_crsepatch`` (`0` or `1`) optional (default `0`)
+    Only used when mesh refinement is activated and ``warpx.plot_raw_fields`` is ``1``.
+    Whether to output the data of the coarse patch, in the plot files.
+    Only works with ``<diag_name>.format = plotfile``.
+
+* ``<diag_name>.coarsening_ratio`` (list of `int`) optional (default `1 1 1`)
+    Reduce size of the field output by this ratio in each dimension.
+    (This is done by averaging the field over 1 or 2 points along each direction, depending on the staggering).
+    ``plot_coarsening_ratio`` should be an integer divisor of ``blocking_factor``, defined in the :ref:`parallelization <parallelization_warpx>` section.
+
+* ``<diag_name>.file_prefix`` (`string`) optional (default `diags/plotfiles/plt`)
+    Root for output file names. Supports sub-directories.
+
+* ``<diag_name>.diag_lo`` (list `float`, 1 per dimension) optional (default `-infinity -infinity -infinity`)
+    Lower corner of the output fields (if smaller than ``warpx.dom_lo``, then set to ``warpx.dom_lo``).
+
+* ``<diag_name>.diag_hi`` (list `float`, 1 per dimension) optional (default `+infinity +infinity +infinity`)
+    Higher corner of the output fields (if larger than ``warpx.dom_hi``, then set to ``warpx.dom_hi``).
+
+* ``<diag_name>.species`` (list of `string`, default all physical species in the simulation)
+    Which species dumped in this diagnostics.
+
+* ``<diag_name>.<species_name>.variables`` (list of `strings` separated by spaces, optional)
+    List of particle quantities to write to output file.
+    By defaults, all quantities are written to file. Choices are
+
+    * ``w`` for the particle weight,
+
+    * ``ux`` ``uy`` ``uz`` for the particle momentum,
+
+    The particle positions are always included.
+    Use ``<species>.variables = none`` to plot no particle data, except particle position.
+
+* ``<diag_name>.<species_name>.random_fraction`` (`float`) optional
+    If provided ``<diag_name>.<species_name>.random_fraction = a``, only `a` fraction of the particle data of this species will be dumped randomly in diag ``<diag_name>``, i.e. if `rand() < a`, this particle will be dumped, where `rand()` denotes a random number generator.
+    The value `a` provided should be between 0 and 1.
+
+* ``<diag_name>.<species_name>.uniform_stride`` (`int`) optional
+    If provided ``<diag_name>.<species_name>.uniform_stride = n``,
+    every `n` particle of this species will be dumped, selected uniformly.
+    The value provided should be an integer greater than or equal to 0.
+
+* ``<diag_name>.<species_name>.plot_filter_function(t,x,y,z,ux,uy,uz)`` (`string`) optional
+    Users can provide an expression returning a boolean for whether a particle is dumped (the exact test is whether the return value is `> 0.5`).
+    `t` represents the physical time in seconds during the simulation.
+    `x, y, z` represent particle positions in the unit of meter.
+    `ux, uy, uz` represent particle velocities in the unit of
+    :math:`\gamma v/c`, where
+    :math:`\gamma` is the Lorentz factor,
+    :math:`v/c` is the particle velocity normalized by the speed of light.
+    E.g. If provided `(x>0.0)*(uz<10.0)` only those particles located at
+    positions `x` greater than `0`, and those having velocity `uz` less than 10,
+    will be dumped.
+
+Back-Transformed Diagnostics
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``BackTransformedDiagnostics`` are used when running a simulation in a boosted frame, to reconstruct output data to the lab frame, and
 
 * ``warpx.do_back_transformed_diagnostics`` (`0` or `1`)
     Whether to use the **back-transformed diagnostics** (i.e. diagnostics that
@@ -1087,55 +1345,6 @@ Diagnostics and output
     ``warpx.back_transformed_diag_fields = Ex Ez By``. By default, all fields
     are dumped.
 
-* ``warpx.plot_raw_fields`` (`0` or `1`) optional (default `0`)
-    By default, the fields written in the plot files are averaged on the nodes.
-    When ```warpx.plot_raw_fields`` is `1`, then the raw (i.e. unaveraged)
-    fields are also saved in the plot files.
-
-* ``warpx.plot_raw_fields_guards`` (`0` or `1`)
-    Only used when ``warpx.plot_raw_fields`` is ``1``.
-    Whether to include the guard cells in the output of the raw fields.
-
-* ``warpx.plot_finepatch`` (`0` or `1`)
-    Only used when mesh refinement is activated and ``warpx.plot_raw_fields`` is ``1``.
-    Whether to output the data of the fine patch, in the plot files.
-
-* ``warpx.plot_crsepatch`` (`0` or `1`)
-    Only used when mesh refinement is activated and ``warpx.plot_raw_fields`` is ``1``.
-    Whether to output the data of the coarse patch, in the plot files.
-
-* ``warpx.plot_coarsening_ratio`` (`int` ; default: `1`)
-    Reduce size of the field output by this ratio in each dimension.
-    (This is done by averaging the field.) ``plot_coarsening_ratio`` should
-    be an integer divisor of ``blocking_factor``.
-
-* ``amr.plot_file`` (`string`)
-    Root for output file names. Supports sub-directories. Default `diags/plotfiles/plt`
-
-* ``warpx.fields_to_plot`` (`list of strings`)
-    Fields written to plotfiles. Possible values: ``Ex`` ``Ey`` ``Ez``
-    ``Bx`` ``By`` ``Bz`` ``jx`` ``jy`` ``jz`` ``part_per_cell`` ``rho``
-    ``F`` ``part_per_grid`` ``part_per_proc`` ``divE`` ``divB``.
-    Default is
-    ``warpx.fields_to_plot = Ex Ey Ez Bx By Bz jx jy jz part_per_cell``.
-
-* ``slice.dom_lo`` and ``slice.dom_hi`` (`2 floats in 2D`, `3 floats in 3D`; in meters similar to the units of the simulation box.)
-    The extent of the slice are defined by the co-ordinates of the lower
-    corner (``slice.dom_lo``) and upper corner (``slice.dom_hi``).
-    The slice could be 1D, 2D, or 3D, aligned with the co-ordinate axes
-    and the first axis of the coordinates is x. For example: if for a
-    3D simulation, an x-z slice is to be extracted at y = 0.0,
-    then the y-value of slice.dom_lo and slice.dom_hi must be equal to 0.0
-
-* ``slice.coarsening_ratio`` (`2 integers in 2D`, `3 integers in 3D`; default `1`)
-    The coarsening ratio input must be greater than 0. Default is 1 in all directions.
-    In the directions that is reduced, i.e., for an x-z slice in 3D,
-    the reduced y-dimension has a default coarsening ratio equal to 1.
-
-* ``slice.plot_int`` (`integer`)
-    The number of PIC cycles inbetween two consecutive data dumps for the slice. Use a
-    negative number to disable slice generation and slice data dumping.
-
 * ``slice.num_slice_snapshots_lab`` (`integer`)
     Only used when ``warpx.do_back_transformed_diagnostics`` is ``1``.
     The number of back-transformed field and particle data that
@@ -1157,6 +1366,12 @@ Diagnostics and output
     copied from the full back-transformed diagnostic to the reduced
     slice diagnostic if there are within the user-defined width from
     the slice region defined by ``slice.dom_lo`` and ``slice.dom_hi``.
+
+
+Reduced Diagnostics
+^^^^^^^^^^^^^^^^^^^
+
+``ReducedDiags`` allow the user to compute some reduced quantity (particle temperature, max of a field) and write a small amount of data to text files.
 
 * ``warpx.reduced_diags_names`` (`strings`, separated by spaces)
     The names given by the user of simple reduced diagnostics.
@@ -1220,7 +1435,7 @@ Diagnostics and output
         This type computes properties of a particle beam relevant for particle accelerators,
         like position, momentum, emittance, etc.
 
-        `<reduced_diags_name>.species` must be provided,
+        ``<reduced_diags_name>.species`` must be provided,
         such that the diagnostics are done for this (beam-like) species only.
 
         The output columns (for 3D-XYZ) are the following, where the average is done over
@@ -1257,10 +1472,87 @@ Diagnostics and output
         :math:`\epsilon_z = \dfrac{1}{mc} \sqrt{\delta_z^2 \delta_{pz}^2 -
         \Big\langle (z-\langle z \rangle) (p_z-\langle p_z \rangle) \Big\rangle^2}`.
 
+        [18]: The charge of the beam (C).
+
         For 2D-XZ,
         :math:`\langle y \rangle`,
         :math:`\delta_y`, and
         :math:`\epsilon_y` will not be outputed.
+
+    * ``LoadBalanceCosts``
+        This type computes the cost, used in load balancing, for each box on the domain.
+        The cost :math:`c` is computed as
+
+        .. math::
+
+            c = n_{\text{particle}} \cdot w_{\text{particle}} + n_{\text{cell}} \cdot w_{\text{cell}},
+
+        where
+        :math:`n_{\text{particle}}` is the number of particles on the box,
+        :math:`w_{\text{particle}}` is the particle cost weight factor (controlled by ``algo.costs_heuristic_particles_wt``),
+        :math:`n_{\text{cell}}` is the number of cells on the box, and
+        :math:`w_{\text{cell}}` is the cell cost weight factor (controlled by ``algo.costs_heuristic_cells_wt``).
+
+    * ``ParticleHistogram``
+        This type computes a user defined particle histogram.
+
+        * ``<reduced_diags_name>.species`` (`string`)
+            A species name must be provided,
+            such that the diagnostics are done for this species.
+
+        * ``<reduced_diags_name>.histogram_function(t,x,y,z,ux,uy,uz)`` (`string`)
+            A histogram function must be provided.
+            `t` represents the physical time in seconds during the simulation.
+            `x, y, z` represent particle positions in the unit of meter.
+            `ux, uy, uz` represent the particle velocities in the unit of
+            :math:`\gamma v/c`, where
+            :math:`\gamma` is the Lorentz factor,
+            :math:`v/c` is the particle velocity normalized by the speed of light.
+            E.g.
+            ``x`` produces the position (density) distribution in `x`.
+            ``ux`` produces the velocity distribution in `x`,
+            ``sqrt(ux*ux+uy*uy+uz*uz)`` produces the speed distribution.
+            The default value of the histogram without normalization is
+            :math:`f = \sum\limits_{i=1}^N w_i`, where
+            :math:`\sum\limits_{i=1}^N` is the sum over :math:`N` particles
+            in that bin,
+            :math:`w_i` denotes the weight of the ith particle.
+
+        * ``<reduced_diags_name>.bin_number`` (`int` > 0)
+            This is the number of bins used for the histogram.
+
+        * ``<reduced_diags_name>.bin_max`` (`float`)
+            This is the maximum value of the bins.
+
+        * ``<reduced_diags_name>.bin_min`` (`float`)
+            This is the minimum value of the bins.
+
+        * ``<reduced_diags_name>.normalization`` (optional)
+            This provides options to normalize the histogram:
+
+            ``unity_particle_weight``
+            uses unity particle weight to compute the histogram,
+            such that the values of the histogram are
+            the number of counted macroparticles in that bin,
+            i.e.  :math:`f = \sum\limits_{i=1}^N 1`,
+            :math:`N` is the number of particles in that bin.
+
+            ``max_to_unity`` will normalize the histogram such that
+            its maximum value is one.
+
+            ``area_to_unity`` will normalize the histogram such that
+            the area under the histogram is one,
+            so the histogram is also the probability density function.
+
+            If nothing is provided,
+            the macroparticle weight will be used to compute
+            the histogram, and no normalization will be done.
+
+        The output columns are
+        values of the 1st bin, the 2nd bin, ..., the nth bin.
+        An example input file and a loading pything script of
+        using the histogram reduced diagnostics
+        are given in ``Examples/Tests/initial_distribution/``.
 
 * ``<reduced_diags_name>.frequency`` (`int`)
     The output frequency (every # time steps).
@@ -1275,10 +1567,11 @@ Diagnostics and output
     The separator between row values in the output file.
     The default separator is a whitespace.
 
-Lookup tables for QED modules (implementation in progress)
-----------------------------------------------------------
+Lookup tables and other settings for QED modules (implementation in progress)
+-----------------------------------------------------------------------------
+
 Lookup tables store pre-computed values for functions used by the QED modules.
-**Implementation of this feature is in progress. It requires to compile with QED=TRUE**
+**Implementation of this feature is in progress. It requires `picsar` on the `QED` branch and to compile with QED=TRUE**
 
 * ``qed_bw.lookup_table_mode`` (`string`)
     There are three options to prepare the lookup table required by the Breit-Wheeler module:
@@ -1353,15 +1646,89 @@ Lookup tables store pre-computed values for functions used by the QED modules.
 
         * ``qed_qs.load_table_from`` (`string`): name of the lookup table file to read from.
 
+* ``qed_qs.photon_creation_energy_threshold`` (`float`) optional (default `2*me*c^2`)
+    Energy threshold for photon particle creation in SI units.
+
+* ``warpx.do_qed_schwinger`` (`bool`) optional (default `0`)
+    If this is 1, Schwinger electron-positron pairs can be generated in vacuum in the cells where the EM field is high enough.
+    Activating the Schwinger process requires the code to be compiled with ``QED=TRUE`` and ``PICSAR`` on the branch ``QED``.
+    If ``warpx.do_qed_schwinger = 1``, Schwinger product species must be specified with
+    ``qed_schwinger.ele_product_species`` and ``qed_schwinger.pos_product_species``.
+    **Note: implementation of this feature is in progress.**
+    So far it requires ``warpx.do_nodal=1`` and does not support mesh refinement, cylindrical coordinates or single precision.
+
+* ``qed_schwinger.ele_product_species`` (`string`)
+    If Schwinger process is activated, an electron product species must be specified
+    (the name of an existing electron species must be provided).
+
+* ``qed_schwinger.pos_product_species`` (`string`)
+    If Schwinger process is activated, a positron product species must be specified
+    (the name of an existing positron species must be provided).
+
+* ``qed_schwinger.y_size`` (`float`; in meters)
+    If Schwinger process is activated with ``DIM=2D``, a transverse size must be specified.
+    It is used to convert the pair production rate per unit volume into an actual number of created particles.
+    This value should correspond to the typical transverse extent for which the EM field has a very high value
+    (e.g. the beam waist for a focused laser beam).
+
+* ``qed_schwinger.threshold_poisson_gaussian`` (`integer`) optional (default `25`)
+    If the expected number of physical pairs created in a cell at a given timestep is smaller than this threshold,
+    a Poisson distribution is used to draw the actual number of physical pairs created.
+    Otherwise a Gaussian distribution is used.
+    Note that, regardless of this parameter, the number of macroparticles created is at most one per cell
+    per timestep per species (with a weight corresponding to the number of physical pairs created).
 
 Checkpoints and restart
 -----------------------
 WarpX supports checkpoints/restart via AMReX.
-
-* ``amr.check_int`` (`integer`)
-    The number of iterations between two consecutive checkpoints. Use a
-    negative number to disable checkpoints.
+The checkpoint capability can be turned with regular diagnostics: ``<diag_name>.format = checkpoint``.
 
 * ``amr.restart`` (`string`)
     Name of the checkpoint file to restart from. Returns an error if the folder does not exist
     or if it is not properly formatted.
+
+Intervals parser
+----------------
+
+WarpX can parse time step interval expressions of the form ``start:stop:period``, e.g.
+``1:2:3, 4::, 5:6, :, ::10``.
+A comma is used as a separator between groups of intervals, which we call slices.
+The resulting time steps are the `union set <https://en.wikipedia.org/wiki/Union_(set_theory)>`_ of all given slices.
+White spaces are ignored.
+A single slice can have 0, 1 or 2 colons ``:``, just as `numpy slices <https://numpy.org/doc/stable/reference/generated/numpy.s_.html>`_, but with inclusive upper bound for ``stop``.
+
+* For 0 colon the given value is the period
+
+* For 1 colon the given string is of the type ``start:stop``
+
+* For 2 colons the given string is of the type ``start:stop:period``
+
+Any value that is not given is set to default.
+Default is ``0`` for the start, ``std::numeric_limits<int>::max()`` for the stop and ``1`` for the
+period.
+For the 1 and 2 colon syntax, actually having the integers in the string is optional
+(this means that ``::5``, ``100 ::10`` and ``100 :`` are all valid syntaxes).
+
+**Examples**
+
+* ``something_int = 50`` -> do something at timesteps 0, 50, 100, 150, etc.
+  (equivalent to ``something_int = ::50``)
+
+* ``something_int = 300:600:100`` -> do something at timesteps 300, 400, 500 and 600.
+
+* ``something_int = 300::50`` -> do something at timesteps 300, 350, 400, 450, etc.
+
+* ``something_int = 105:108,205:208`` -> do something at timesteps 105, 106, 107, 108,
+  205, 206, 207 and 208. (equivalent to ``something_int = 105 : 108 : , 205 : 208 :``)
+
+* ``something_int = :`` or  ``something_int = ::`` -> do something at every timestep.
+
+* ``something_int = 167:167,253:253,275:425:50`` do something at timesteps 167, 253, 275,
+  325, 375 and 425.
+
+This is essentially the python slicing syntax except that the stop is inclusive
+(``0:100`` contains 100) and that no colon means that the given value is the period.
+
+Note that if a given period is zero or negative, the correspoding slice is disregarded.
+For example, ``something_int = -1`` deactivates ``something`` and
+``something_int = ::-1,100:1000:25`` is equivalent to ``something_int = 100:1000:25``.

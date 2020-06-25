@@ -17,14 +17,16 @@
 #include "Laser/LaserParticleContainer.H"
 #include "Parser/WarpXParserWrapper.H"
 #include "Particles/Collision/CollisionType.H"
+#include "Particles/ParticleCreation/SmartUtils.H"
 #include "Particles/ParticleCreation/SmartCopy.H"
+#include "Particles/ParticleCreation/SmartCreate.H"
 #include "Particles/ParticleCreation/FilterCopyTransform.H"
 #include "Particles/RigidInjectedParticleContainer.H"
 
 #ifdef WARPX_QED
-#   include "QED/QedChiFunctions.H"
-#   include "QED/BreitWheelerEngineWrapper.H"
-#   include "QED/QuantumSyncEngineWrapper.H"
+#   include "Particles/ElementaryProcess/QEDInternals/QedChiFunctions.H"
+#   include "Particles/ElementaryProcess/QEDInternals/BreitWheelerEngineWrapper.H"
+#   include "Particles/ElementaryProcess/QEDInternals/QuantumSyncEngineWrapper.H"
 #endif
 
 #include "CollisionType.H"
@@ -61,9 +63,11 @@ public:
 
     ~MultiParticleContainer() {}
 
-    WarpXParticleContainer& GetParticleContainer (int ispecies) {
-        return *allcontainers[ispecies];
-    }
+    WarpXParticleContainer&
+    GetParticleContainer (int ispecies) const {return *allcontainers[ispecies];}
+
+    WarpXParticleContainer*
+    GetParticleContainerPtr (int ispecies) const {return allcontainers[ispecies].get();}
 
 #ifdef WARPX_USE_OPENPMD
     std::unique_ptr<WarpXParticleContainer>& GetUniqueContainer(int ispecies) {
@@ -77,15 +81,6 @@ public:
     void AllocData ();
 
     void InitData ();
-
-    ///
-    /// Performs the field gather operation using the input fields E and B, for all the species
-    /// in the MultiParticleContainer. This is the electromagnetic version of the field gather.
-    ///
-    void FieldGather (int lev,
-                      const amrex::MultiFab& Ex, const amrex::MultiFab& Ey,
-                      const amrex::MultiFab& Ez, const amrex::MultiFab& Bx,
-                      const amrex::MultiFab& By, const amrex::MultiFab& Bz);
 
     ///
     /// This evolves all the particles by one PIC time step, including current deposition, the
@@ -125,9 +120,22 @@ public:
     ///
     std::unique_ptr<amrex::MultiFab> GetChargeDensity(int lev, bool local = false);
 
-    void doFieldIonization ();
+    void doFieldIonization (int lev,
+                            const amrex::MultiFab& Ex, const amrex::MultiFab& Ey, const amrex::MultiFab& Ez,
+                            const amrex::MultiFab& Bx, const amrex::MultiFab& By, const amrex::MultiFab& Bz);
 
     void doCoulombCollisions ();
+
+#ifdef WARPX_QED
+    /** If Schwinger process is activated, this function is called at every
+     * timestep in Evolve and is used to create Schwinger electron-positron pairs.
+     * Within this function we loop over all cells to calculate the number of
+     * created physical pairs. If this number is higher than 0, we create a single
+     * particle per species in this cell, with a weight corresponding to the number of physical
+     * particles.
+     */
+    void doQEDSchwinger ();
+#endif
 
     void Checkpoint (const std::string& dir) const;
 
@@ -210,8 +218,46 @@ public:
     void PulsarParticleInjection();
     void PulsarParticleRemoval();
 #endif
+#ifdef WARPX_QED
+    /**
+    * \brief Performs QED events (Breit-Wheeler process and photon emission)
+    */
+    void doQedEvents (int lev,
+                      const amrex::MultiFab& Ex,
+                      const amrex::MultiFab& Ey,
+                      const amrex::MultiFab& Ez,
+                      const amrex::MultiFab& Bx,
+                      const amrex::MultiFab& By,
+                      const amrex::MultiFab& Bz);
+#endif
+
+    int getSpeciesID (std::string product_str) const;
 
 protected:
+
+#ifdef WARPX_QED
+    /**
+    * \brief Performs Breit-Wheeler process for the species for which it is enabled
+    */
+    void doQedBreitWheeler (int lev,
+                            const amrex::MultiFab& Ex,
+                            const amrex::MultiFab& Ey,
+                            const amrex::MultiFab& Ez,
+                            const amrex::MultiFab& Bx,
+                            const amrex::MultiFab& By,
+                            const amrex::MultiFab& Bz);
+
+    /**
+    * \brief Performs QED photon emission for the species for which it is enabled
+    */
+    void doQedQuantumSync (int lev,
+                           const amrex::MultiFab& Ex,
+                           const amrex::MultiFab& Ey,
+                           const amrex::MultiFab& Ez,
+                           const amrex::MultiFab& Bx,
+                           const amrex::MultiFab& By,
+                           const amrex::MultiFab& Bz);
+#endif
 
     // Particle container types
     enum struct PCTypes {Physical, RigidInjected, Photon};
@@ -232,8 +278,25 @@ protected:
 
     std::vector<PCTypes> species_types;
 
+    template<typename ...Args>
     amrex::MFItInfo getMFItInfo (const WarpXParticleContainer& pc_src,
-                                 const WarpXParticleContainer& pc_dst) const noexcept;
+                                 Args const&... pc_dsts) const noexcept
+    {
+        amrex::MFItInfo info;
+
+        MFItInfoCheckTiling(pc_src, pc_dsts...);
+
+        if (pc_src.do_tiling && amrex::Gpu::notInLaunchRegion()) {
+            info.EnableTiling(pc_src.tile_size);
+        }
+
+#ifdef _OPENMP
+        info.SetDynamic(true);
+#endif
+
+        return info;
+    }
+
 
 #ifdef WARPX_QED
     // The QED engines
@@ -251,6 +314,10 @@ protected:
     int m_nspecies_quantum_sync = 0;
     int m_nspecies_breit_wheeler = 0;
     //________
+
+    amrex::ParticleReal m_quantum_sync_photon_creation_energy_threshold =
+      static_cast<amrex::ParticleReal>(
+        2.0 * PhysConst::m_e * PhysConst::c * PhysConst::c );  /*!< Energy threshold for photon creation in Quantum Synchrotron process.*/
 
     /**
      * Returns the number of species having Quantum Synchrotron process enabled
@@ -284,19 +351,36 @@ protected:
      */
     void BreitWheelerGenerateTable();
 
+    /** Whether or not to activate Schwinger process */
+    bool m_do_qed_schwinger = 0;
+    /** Name of Schwinger electron product species */
+    std::string m_qed_schwinger_ele_product_name;
+    /** Name of Schwinger positron product species */
+    std::string m_qed_schwinger_pos_product_name;
+    /** Index for Schwinger electron product species in allcontainers */
+    int m_qed_schwinger_ele_product;
+    /** Index for Schwinger positron product species in allcontainers */
+    int m_qed_schwinger_pos_product;
+    /** Transverse size used in 2D Schwinger pair production rate calculations */
+    amrex::Real m_qed_schwinger_y_size;
+    /** If the number of physical Schwinger pairs created within a cell is
+     * higher than this threshold we use a Gaussian distribution rather than
+     * a Poisson distribution for the pair production rate calculations
+     */
+    int m_qed_schwinger_threshold_poisson_gaussian = 25;
+
 #endif
 
 private:
 
     // physical particles (+ laser)
-    amrex::Vector<std::unique_ptr<WarpXParticleContainer> > allcontainers;
+    amrex::Vector<std::unique_ptr<WarpXParticleContainer>> allcontainers;
     // Temporary particle container, used e.g. for particle splitting.
     std::unique_ptr<PhysicalParticleContainer> pc_tmp;
 
     void ReadParameters ();
 
     void mapSpeciesProduct ();
-    int getSpeciesID (std::string product_str);
 
     // Number of species dumped in BackTransformedDiagnostics
     int nspecies_back_transformed_diagnostics = 0;
@@ -309,5 +393,41 @@ private:
     int nlasers = 0;
     int nspecies = 1;   // physical particles only. nspecies+nlasers == allcontainers.size().
     int ncollisions = 0;
+
+    void MFItInfoCheckTiling(const WarpXParticleContainer& pc_src) const noexcept
+    {
+        return;
+    }
+
+    template<typename First, typename ...Args>
+    void MFItInfoCheckTiling(const WarpXParticleContainer& pc_src,
+                             First const& pc_dst, Args const&... others) const noexcept
+    {
+        if (pc_src.do_tiling && amrex::Gpu::notInLaunchRegion()) {
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(pc_dst.do_tiling,
+                "For particle creation processes, either all or none of the "
+                "particle species must use tiling.");
+        }
+
+        MFItInfoCheckTiling(pc_src, others...);
+    }
+
+    /**
+    * Should be called right after mapSpeciesProduct in InitData.
+    * It checks the physical correctness of product particle species
+    * selected by the user for ionization process.
+    */
+    void CheckIonizationProductSpecies();
+
+#ifdef WARPX_QED
+    /**
+    * Should be called right after mapSpeciesProduct in InitData.
+    * It checks the physical correctness of product particle species
+    * selected by the user for QED processes.
+    */
+    void CheckQEDProductSpecies();
+#endif
+
+
 };
 #endif /*WARPX_ParticleContainer_H_*/

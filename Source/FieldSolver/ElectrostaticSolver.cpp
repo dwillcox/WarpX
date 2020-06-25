@@ -18,7 +18,6 @@ WarpX::ComputeSpaceChargeField (bool const reset_fields)
 {
     if (reset_fields) {
         // Reset all E and B fields to 0, before calculating space-charge fields
-        const int num_levels = max_level + 1;
         for (int lev = 0; lev <= max_level; lev++) {
             for (int comp=0; comp<3; comp++) {
                 Efield_fp[lev][comp]->setVal(0);
@@ -158,7 +157,7 @@ WarpX::computeE (amrex::Vector<std::array<std::unique_ptr<amrex::MultiFab>, 3> >
         const Real* dx = Geom(lev).CellSize();
 
 #ifdef _OPENMP
-        #pragma omp parallel if (Gpu::notInLaunchRegion())
+#    pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif
         for ( MFIter mfi(*phi[lev], TilingIfNotGPU()); mfi.isValid(); ++mfi )
         {
@@ -169,13 +168,17 @@ WarpX::computeE (amrex::Vector<std::array<std::unique_ptr<amrex::MultiFab>, 3> >
 #else
             const Real inv_dz = 1./dx[1];
 #endif
-            const Box& tbx  = mfi.tilebox(Ex_nodal_flag);
-            const Box& tby  = mfi.tilebox(Ey_nodal_flag);
-            const Box& tbz  = mfi.tilebox(Ez_nodal_flag);
+            const Box& tbx  = mfi.tilebox( E[lev][0]->ixType().toIntVect() );
+#if (AMREX_SPACEDIM == 3)
+            const Box& tby  = mfi.tilebox( E[lev][1]->ixType().toIntVect() );
+#endif
+            const Box& tbz  = mfi.tilebox( E[lev][2]->ixType().toIntVect() );
 
             const auto& phi_arr = phi[lev]->array(mfi);
             const auto& Ex_arr = (*E[lev][0])[mfi].array();
+#if (AMREX_SPACEDIM == 3)
             const auto& Ey_arr = (*E[lev][1])[mfi].array();
+#endif
             const auto& Ez_arr = (*E[lev][2])[mfi].array();
 
             Real beta_x = beta[0];
@@ -256,7 +259,7 @@ WarpX::computeB (amrex::Vector<std::array<std::unique_ptr<amrex::MultiFab>, 3> >
         const Real* dx = Geom(lev).CellSize();
 
 #ifdef _OPENMP
-        #pragma omp parallel if (Gpu::notInLaunchRegion())
+#    pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif
         for ( MFIter mfi(*phi[lev], TilingIfNotGPU()); mfi.isValid(); ++mfi )
         {
@@ -267,9 +270,9 @@ WarpX::computeB (amrex::Vector<std::array<std::unique_ptr<amrex::MultiFab>, 3> >
 #else
             const Real inv_dz = 1./dx[1];
 #endif
-            const Box& tbx  = mfi.tilebox(Bx_nodal_flag);
-            const Box& tby  = mfi.tilebox(By_nodal_flag);
-            const Box& tbz  = mfi.tilebox(Bz_nodal_flag);
+            const Box& tbx  = mfi.tilebox( B[lev][0]->ixType().toIntVect() );
+            const Box& tby  = mfi.tilebox( B[lev][1]->ixType().toIntVect() );
+            const Box& tbz  = mfi.tilebox( B[lev][2]->ixType().toIntVect() );
 
             const auto& phi_arr = phi[0]->array(mfi);
             const auto& Bx_arr = (*B[lev][0])[mfi].array();

@@ -16,9 +16,8 @@
 #ifdef WARPX_USE_PY
 #   include "Python/WarpX_py.H"
 #endif
-
-#ifdef BL_USE_SENSEI_INSITU
-#   include <AMReX_AmrMeshInSituBridge.H>
+#ifdef WARPX_USE_PSATD
+#include "FieldSolver/SpectralSolver/SpectralSolver.H"
 #endif
 
 #ifdef PULSAR
@@ -37,9 +36,6 @@ WarpX::Evolve (int numsteps)
 
     Real cur_time = t_new[0];
     static int last_plot_file_step = 0;
-    static int last_openPMD_step = 0;
-    static int last_check_file_step = 0;
-    static int last_insitu_step = 0;
 
     if (do_compute_max_step_from_zmax) {
         computeMaxStepBoostAccelerator(geom[0]);
@@ -58,41 +54,39 @@ WarpX::Evolve (int numsteps)
     {
         Real walltime_beg_step = amrex::second();
 
+        multi_diags->NewIteration();
+
         // Start loop on time steps
         amrex::Print() << "\nSTEP " << step+1 << " starts ...\n";
 #ifdef WARPX_USE_PY
         if (warpx_py_beforestep) warpx_py_beforestep();
 #endif
 
-        MultiFab* cost = WarpX::getCosts(0);
-        amrex::Vector<amrex::Real>* cost_heuristic = WarpX::getCostsHeuristic(0);
-        if (cost != nullptr || cost_heuristic != nullptr) {
+        amrex::LayoutData<amrex::Real>* cost = WarpX::getCosts(0);
+        if (cost) {
 #ifdef WARPX_USE_PSATD
             amrex::Abort("LoadBalance for PSATD: TODO");
 #endif
-            if (step > 0 && (step+1) % load_balance_int == 0)
+            if (step > 0 && load_balance_intervals.contains(step+1))
             {
                 LoadBalance();
+
                 // Reset the costs to 0
-                for (int lev = 0; lev <= finest_level; ++lev)
-                {
-                    if (WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
-                    {
-                        costs[lev]->setVal(0.0);
-                    } else if (WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Heuristic)
-                    {
-                        costs_heuristic[lev]->assign((*costs_heuristic[lev]).size(), 0.0);
-                    }
-                }
+                ResetCosts();
             }
             for (int lev = 0; lev <= finest_level; ++lev)
             {
-                MultiFab* cost = WarpX::getCosts(lev);
-                if (cost)
+                cost = WarpX::getCosts(lev);
+                if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
                 {
                     // Perform running average of the costs
-                    // (Giving more importance to most recent costs)
-                    cost->mult( (1. - 2./load_balance_int) );
+                    // (Giving more importance to most recent costs; only needed
+                    // for timers update, heuristic load balance considers the
+                    // instantaneous costs)
+                    for (int i : cost->IndexArray())
+                    {
+                        (*cost)[i] *= (1. - 2./load_balance_intervals.localPeriod(step+1));
+                    }
                 }
             }
         }
@@ -211,15 +205,6 @@ WarpX::Evolve (int numsteps)
 
         cur_time += dt[0];
 
-        bool to_make_plot = ( (plot_int > 0) && ((step+1) % plot_int == 0) );
-        bool to_write_openPMD = ( (openpmd_int > 0) && ((step+1) % openpmd_int == 0) );
-
-        // slice generation //
-        bool to_make_slice_plot = (slice_plot_int > 0) && ( (step+1)% slice_plot_int == 0);
-
-        bool do_insitu = ((step+1) >= insitu_start) &&
-            (insitu_int > 0) && ((step+1) % insitu_int == 0);
-
         if (do_back_transformed_diagnostics) {
             std::unique_ptr<MultiFab> cell_centered_data = nullptr;
             if (WarpX::do_back_transformed_fields) {
@@ -228,7 +213,7 @@ WarpX::Evolve (int numsteps)
             myBFD->writeLabFrameData(cell_centered_data.get(), *mypc, geom[0], cur_time, dt[0]);
         }
 
-        bool move_j = is_synchronized || to_make_plot || to_write_openPMD || do_insitu;
+        bool move_j = is_synchronized;
         // If is_synchronized we need to shift j too so that next step we can evolve E by dt/2.
         // We might need to move j because we are going to make a plotfile.
 
@@ -247,30 +232,31 @@ WarpX::Evolve (int numsteps)
        mypc->PulsarParticleInjection();
 #endif
 
-#ifdef WARPX_DO_ELECTROSTATIC
         // Electrostatic solver: particles can move by an arbitrary number of cells
-        mypc->Redistribute();
-#else
-        // Electromagnetic solver: due to CFL condition, particles can
-        // only move by one or two cells per time step
-        if (max_level == 0) {
-            int num_redistribute_ghost = num_moved;
-            if ((v_galilean[0]!=0) or (v_galilean[1]!=0) or (v_galilean[2]!=0)) {
-                // Galilean algorithm ; particles can move by up to 2 cells
-                num_redistribute_ghost += 2;
-            } else {
-                // Standard algorithm ; particles can move by up to 1 cell
-                num_redistribute_ghost += 1;
-            }
-            mypc->RedistributeLocal(num_redistribute_ghost);
-        }
-        else {
+        if( do_electrostatic )
+        {
             mypc->Redistribute();
+        } else
+        {
+            // Electromagnetic solver: due to CFL condition, particles can
+            // only move by one or two cells per time step
+            if (max_level == 0) {
+                int num_redistribute_ghost = num_moved;
+                if ((v_galilean[0]!=0) or (v_galilean[1]!=0) or (v_galilean[2]!=0)) {
+                    // Galilean algorithm ; particles can move by up to 2 cells
+                    num_redistribute_ghost += 2;
+                } else {
+                    // Standard algorithm ; particles can move by up to 1 cell
+                    num_redistribute_ghost += 1;
+                }
+                mypc->RedistributeLocal(num_redistribute_ghost);
+            }
+            else {
+                mypc->Redistribute();
+            }
         }
-#endif
 
-        bool to_sort = (sort_int > 0) && ((step+1) % sort_int == 0);
-        if (to_sort) {
+        if (sort_intervals.contains(step+1)) {
             amrex::Print() << "re-sorting particles \n";
             mypc->SortParticlesByBin(sort_bin_size);
         }
@@ -295,50 +281,7 @@ WarpX::Evolve (int numsteps)
             reduced_diags->WriteToFile(step);
         }
 
-        // slice gen //
-        if (to_make_plot || to_write_openPMD || do_insitu || to_make_slice_plot)
-        {
-            // This is probably overkill, but it's not called often
-            FillBoundaryE(guard_cells.ng_alloc_EB, guard_cells.ng_Extra);
-            // This is probably overkill, but it's not called often
-            FillBoundaryB(guard_cells.ng_alloc_EB, guard_cells.ng_Extra);
-            // This is probably overkill, but it's not called often
-#ifndef WARPX_USE_PSATD
-            FillBoundaryAux(guard_cells.ng_UpdateAux);
-#endif
-            UpdateAuxilaryData();
-
-            for (int lev = 0; lev <= finest_level; ++lev) {
-                mypc->FieldGather(lev,
-                                  *Efield_aux[lev][0],*Efield_aux[lev][1],*Efield_aux[lev][2],
-                                  *Bfield_aux[lev][0],*Bfield_aux[lev][1],*Bfield_aux[lev][2]);
-            }
-
-            last_plot_file_step = step+1;
-            last_openPMD_step = step+1;
-            last_insitu_step = step+1;
-
-            if (to_make_plot)
-                WritePlotFile();
-            if (to_write_openPMD)
-                WriteOpenPMDFile();
-
-            if (to_make_slice_plot)
-            {
-                InitializeSliceMultiFabs ();
-                SliceGenerationForDiagnostics();
-                WriteSlicePlotFile();
-                ClearSliceMultiFabs ();
-            }
-
-            if (do_insitu)
-                UpdateInSitu();
-        }
-
-        if (check_int > 0 && (step+1) % check_int == 0) {
-            last_check_file_step = step+1;
-            WriteCheckPointFile();
-        }
+        multi_diags->FilterComputePackFlush( step );
 
         if (cur_time >= stop_time - 1.e-3*dt[0]) {
             max_time_reached = true;
@@ -351,55 +294,11 @@ WarpX::Evolve (int numsteps)
         // End loop on time steps
     }
 
-    bool write_plot_file = plot_int > 0 && istep[0] > last_plot_file_step
-        && (max_time_reached || istep[0] >= max_step);
-    bool write_openPMD = openpmd_int > 0 && istep[0] > last_openPMD_step
-        && (max_time_reached || istep[0] >= max_step);
-
-    bool do_insitu = (insitu_start >= istep[0]) && (insitu_int > 0) &&
-        (istep[0] > last_insitu_step) && (max_time_reached || istep[0] >= max_step);
-
-    if (write_plot_file || write_openPMD || do_insitu)
-    {
-        // This is probably overkill, but it's not called often
-        FillBoundaryE(guard_cells.ng_alloc_EB, guard_cells.ng_Extra);
-        // This is probably overkill, but it's not called often
-        FillBoundaryB(guard_cells.ng_alloc_EB, guard_cells.ng_Extra);
-        // This is probably overkill
-#ifndef WARPX_USE_PSATD
-        FillBoundaryAux(guard_cells.ng_UpdateAux);
-#endif
-        UpdateAuxilaryData();
-
-        for (int lev = 0; lev <= finest_level; ++lev) {
-            mypc->FieldGather(lev,
-                              *Efield_aux[lev][0],*Efield_aux[lev][1],
-                              *Efield_aux[lev][2],
-                              *Bfield_aux[lev][0],*Bfield_aux[lev][1],
-                              *Bfield_aux[lev][2]);
-        }
-
-        if (write_plot_file)
-            WritePlotFile();
-        if (write_openPMD)
-            WriteOpenPMDFile();
-
-        if (do_insitu)
-            UpdateInSitu();
-    }
-
-    if (check_int > 0 && istep[0] > last_check_file_step &&
-        (max_time_reached || istep[0] >= max_step)) {
-        WriteCheckPointFile();
-    }
+    multi_diags->FilterComputePackFlush( istep[0], true );
 
     if (do_back_transformed_diagnostics) {
         myBFD->Flush(geom[0]);
     }
-
-#ifdef BL_USE_SENSEI_INSITU
-    insitu_bridge->finalize();
-#endif
 }
 
 /* /brief Perform one PIC iteration, without subcycling
@@ -422,8 +321,12 @@ WarpX::OneStep_nosub (Real cur_time)
 
     // Loop over species. For each ionizable species, create particles in
     // product species.
-    mypc->doFieldIonization();
+    doFieldIonization();
+
     mypc->doCoulombCollisions();
+#ifdef WARPX_QED
+    mypc->doQEDSchwinger();
+#endif
     // Push particle from x^{n} to x^{n+1}
     //               from p^{n-1/2} to p^{n+1/2}
     // Deposit current j^{n+1/2}
@@ -439,9 +342,34 @@ WarpX::OneStep_nosub (Real cur_time)
     if (warpx_py_afterdeposition) warpx_py_afterdeposition();
 #endif
 
-    SyncCurrent();
+#ifdef WARPX_USE_PSATD
+    // Apply current correction in Fourier space
+    // (equation (19) of https://doi.org/10.1016/j.jcp.2013.03.010)
+    if ( fft_periodic_single_box == false ) {
+        // For domain decomposition with local FFT over guard cells,
+        // apply this before `SyncCurrent`, i.e. before exchanging guard cells for J
+        if ( do_current_correction ) CurrentCorrection();
+    }
+#endif
 
+#ifdef WARPX_QED
+    doQEDEvents();
+#endif
+
+    // Synchronize J and rho
+    SyncCurrent();
     SyncRho();
+
+#ifdef WARPX_USE_PSATD
+    // Apply current correction in Fourier space
+    // (equation (19) of https://doi.org/10.1016/j.jcp.2013.03.010)
+    if ( fft_periodic_single_box == true ) {
+        // For periodic, single-box FFT (FFT without guard cells)
+        // apply this after `SyncCurrent`, i.e. after exchanging guard cells for J
+        if ( do_current_correction ) CurrentCorrection();
+    }
+#endif
+
 
     // At this point, J is up-to-date inside the domain, and E and B are
     // up-to-date including enough guard cells for first step of the field
@@ -478,7 +406,15 @@ WarpX::OneStep_nosub (Real cur_time)
         EvolveB(0.5*dt[0]); // We now have B^{n+1/2}
 
         FillBoundaryB(guard_cells.ng_FieldSolver, IntVect::TheZeroVector());
-        EvolveE(dt[0]); // We now have E^{n+1}
+        if (WarpX::em_solver_medium == MediumForEM::Vacuum) {
+            // vacuum medium
+            EvolveE(dt[0]); // We now have E^{n+1}
+        } else if (WarpX::em_solver_medium == MediumForEM::Macroscopic) {
+            // macroscopic medium
+            MacroscopicEvolveE(dt[0]); // We now have E^{n+1}
+        } else {
+            amrex::Abort(" Medium for EM is unknown \n");
+        }
 
         FillBoundaryE(guard_cells.ng_FieldSolver, IntVect::TheZeroVector());
         EvolveF(0.5*dt[0], DtType::SecondHalf);
@@ -518,14 +454,19 @@ WarpX::OneStep_nosub (Real cur_time)
 void
 WarpX::OneStep_sub1 (Real curtime)
 {
-#ifdef WARPX_DO_ELECTROSTATIC
-    amrex::Abort("Electrostatic solver cannot be used with sub-cycling.");
-#endif
+    if( do_electrostatic )
+    {
+        amrex::Abort("Electrostatic solver cannot be used with sub-cycling.");
+    }
 
     // TODO: we could save some charge depositions
     // Loop over species. For each ionizable species, create particles in
     // product species.
-    mypc->doFieldIonization();
+    doFieldIonization();
+
+#ifdef WARPX_QED
+    doQEDEvents();
+#endif
 
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(finest_level == 1, "Must have exactly two levels");
     const int fine_lev = 1;
@@ -662,6 +603,40 @@ WarpX::OneStep_sub1 (Real curtime)
 }
 
 void
+WarpX::doFieldIonization ()
+{
+    for (int lev = 0; lev <= finest_level; ++lev) {
+        doFieldIonization(lev);
+    }
+}
+
+void
+WarpX::doFieldIonization (int lev)
+{
+    mypc->doFieldIonization(lev,
+                            *Efield_aux[lev][0],*Efield_aux[lev][1],*Efield_aux[lev][2],
+                            *Bfield_aux[lev][0],*Bfield_aux[lev][1],*Bfield_aux[lev][2]);
+}
+
+#ifdef WARPX_QED
+void
+WarpX::doQEDEvents ()
+{
+    for (int lev = 0; lev <= finest_level; ++lev) {
+        doQEDEvents(lev);
+    }
+}
+
+void
+WarpX::doQEDEvents (int lev)
+{
+    mypc->doQedEvents(lev,
+                      *Efield_aux[lev][0],*Efield_aux[lev][1],*Efield_aux[lev][2],
+                      *Bfield_aux[lev][0],*Bfield_aux[lev][1],*Bfield_aux[lev][2]);
+}
+#endif
+
+void
 WarpX::PushParticlesandDepose (amrex::Real cur_time)
 {
     // Evolve particles to p^{n+1/2} and x^{n+1}
@@ -707,6 +682,9 @@ WarpX::ComputeDt ()
     if (maxwell_fdtd_solver_id == 0) {
         // CFL time step Yee solver
 #ifdef WARPX_DIM_RZ
+#    ifdef WARPX_USE_PSATD
+        deltat = cfl*dx[1]/PhysConst::c;
+#    else
         // In the rz case, the Courant limit has been evaluated
         // semi-analytically by R. Lehe, and resulted in the following
         // coefficients.
@@ -723,6 +701,7 @@ WarpX::ComputeDt ()
             multimode_alpha = (n_rz_azimuthal_modes - 1)*(n_rz_azimuthal_modes - 1) - 0.4;
         }
         deltat  = cfl * 1./( std::sqrt((1+multimode_alpha)/(dx[0]*dx[0]) + 1./(dx[1]*dx[1])) * PhysConst::c );
+#    endif
 #else
         deltat  = cfl * 1./( std::sqrt(AMREX_D_TERM(  1./(dx[0]*dx[0]),
                                                       + 1./(dx[1]*dx[1]),
@@ -868,3 +847,20 @@ WarpX::applyMirrors(Real time){
         }
     }
 }
+
+#ifdef WARPX_USE_PSATD
+void
+WarpX::CurrentCorrection ()
+{
+    for ( int lev = 0; lev <= finest_level; ++lev )
+    {
+        // Apply correction on fine patch
+        spectral_solver_fp[lev]->CurrentCorrection( current_fp[lev], rho_fp[lev] );
+        if ( spectral_solver_cp[lev] )
+        {
+            // Apply correction on coarse patch
+            spectral_solver_cp[lev]->CurrentCorrection( current_cp[lev], rho_cp[lev] );
+        }
+    }
+}
+#endif

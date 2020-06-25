@@ -6,6 +6,7 @@ CXXSTD        = c++14
 USE_MPI       = TRUE
 USE_PARTICLES = TRUE
 USE_RPATH     = TRUE
+BL_NO_FORT    = TRUE
 
 ifeq ($(USE_GPU),TRUE)
   USE_OMP  = FALSE
@@ -21,9 +22,9 @@ ifeq ($(USE_RZ),TRUE)
 endif
 
 ifeq ($(USE_ASCENT_INSITU),TRUE)
-  ASCENT_HOME ?= NOT_SET
-  ifneq ($(ASCENT_HOME),NOT_SET)
-    include $(ASCENT_HOME)/share/ascent/ascent_config.mk
+  ASCENT_DIR ?= NOT_SET
+  ifneq ($(ASCENT_DIR),NOT_SET)
+    include $(ASCENT_DIR)/share/ascent/ascent_config.mk
   endif
   USE_CONDUIT = TRUE
   USE_ASCENT = TRUE
@@ -67,7 +68,6 @@ include $(WARPX_HOME)/Source/BoundaryConditions/Make.package
 include $(WARPX_HOME)/Source/Diagnostics/Make.package
 include $(WARPX_HOME)/Source/FieldSolver/Make.package
 include $(WARPX_HOME)/Source/Filter/Make.package
-include $(WARPX_HOME)/Source/FortranInterface/Make.package
 include $(WARPX_HOME)/Source/Initialization/Make.package
 include $(WARPX_HOME)/Source/Laser/Make.package
 include $(WARPX_HOME)/Source/Parallelization/Make.package
@@ -94,7 +94,6 @@ ifeq ($(QED),TRUE)
   CFLAGS   += -DWARPX_QED
   FFLAGS   += -DWARPX_QED
   F90FLAGS += -DWARPX_QED
-  include $(WARPX_HOME)/Source/QED/Make.package
   USERSuffix := $(USERSuffix).QED
 
   ifeq ($(QED_TABLE_GEN),TRUE)
@@ -135,7 +134,7 @@ endif
 
 ifeq ($(USE_OPENPMD), TRUE)
    # try pkg-config query
-   ifeq (0, $(shell pkg-config "openPMD >= 0.10.3"; echo $$?))
+   ifeq (0, $(shell pkg-config "openPMD >= 0.11.0"; echo $$?))
        CXXFLAGS += $(shell pkg-config --cflags openPMD)
        LIBRARY_LOCATIONS += $(shell pkg-config --variable=libdir openPMD)
        libraries += $(shell pkg-config --libs-only-l openPMD)
@@ -152,6 +151,7 @@ ifeq ($(USE_OPENPMD), TRUE)
        libraries += -lopenPMD
    endif
    DEFINES += -DWARPX_USE_OPENPMD
+   USERSuffix := $(USERSuffix).OPMD
 endif
 
 
@@ -160,21 +160,28 @@ ifeq ($(USE_PSATD),TRUE)
   DEFINES += -DWARPX_USE_PSATD
   ifeq ($(USE_CUDA),FALSE) # Running on CPU
      # Use FFTW
-     libraries += -lfftw3_mpi -lfftw3 -lfftw3_threads
+     ifeq ($(PRECISION),FLOAT)
+          libraries += -lfftw3f_mpi -lfftw3f -lfftw3f_threads
+     else
+          libraries += -lfftw3_mpi -lfftw3 -lfftw3_threads
+     endif
      FFTW_HOME ?= NOT_SET
      ifneq ($(FFTW_HOME),NOT_SET)
        VPATH_LOCATIONS += $(FFTW_HOME)/include
        INCLUDE_LOCATIONS += $(FFTW_HOME)/include
        LIBRARY_LOCATIONS += $(FFTW_HOME)/lib
      endif
-     ifeq ($(USE_PSATD_PICSAR),TRUE)
-        # Compile with PICSAR's Hybrid-MPI PSATD
-        DEFINES += -DWARPX_USE_PSATD_HYBRID
-        DEFINES += -DFFTW # PICSAR uses it
-     endif
   else
     # Use cuFFT
     libraries += -lcufft
+  endif
+  ifeq ($(USE_RZ),TRUE)
+    # Use blas and lapack
+    INCLUDE_LOCATIONS += $(LAPACKPP_HOME)/include
+    INCLUDE_LOCATIONS += $(BLASPP_HOME)/include
+    LIBRARY_LOCATIONS += $(LAPACKPP_HOME)/lib
+    LIBRARY_LOCATIONS += $(BLASPP_HOME)/lib
+    libraries += -llapackpp -lblaspp
   endif
 endif
 
@@ -182,24 +189,12 @@ ifeq ($(USE_RZ),TRUE)
   USERSuffix := $(USERSuffix).RZ
 endif
 
-ifeq ($(DO_ELECTROSTATIC),TRUE)
-     DEFINES += -DWARPX_DO_ELECTROSTATIC
-endif
-
 ifeq ($(USE_HDF5),TRUE)
-    HDF5_HOME ?= NOT_SET
-    ifneq ($(HDF5_HOME),NOT_SET)
-        VPATH_LOCATIONS += $(HDF5_HOME)/include
-        INCLUDE_LOCATIONS += $(HDF5_HOME)/include
-        LIBRARY_LOCATIONS += $(HDF5_HOME)/lib
-    endif
     DEFINES += -DWARPX_USE_HDF5
-    libraries += -lhdf5 -lz
 endif
 
 # job_info support
 CEXE_sources += AMReX_buildInfo.cpp
-CEXE_headers += $(AMREX_HOME)/Tools/C_scripts/AMReX_buildInfo.H
 INCLUDE_LOCATIONS += $(AMREX_HOME)/Tools/C_scripts
 
 ifeq ($(USE_PYTHON_MAIN),TRUE)

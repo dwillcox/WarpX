@@ -78,6 +78,8 @@ extern "C" {
 
     void warpx_ConvertLabParamsToBoost();
 
+    void warpx_CheckGriddingForRZSpectral();
+
     amrex::Real warpx_getProbLo(int dir);
 
     amrex::Real warpx_getProbHi(int dir);
@@ -109,14 +111,6 @@ extern "C" {
 
   int warpx_maxStep ();
   amrex::Real warpx_stopTime ();
-
-  int warpx_checkInt ();
-  int warpx_plotInt ();
-  int warpx_openpmdInt ();
-
-  void warpx_WriteCheckPointFile ();
-  void warpx_WritePlotFile ();
-  void warpx_WriteOpenPMDFile ();
 
   int warpx_finestLevel ();
 

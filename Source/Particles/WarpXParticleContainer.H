@@ -10,19 +10,21 @@
 #ifndef WARPX_WarpXParticleContainer_H_
 #define WARPX_WarpXParticleContainer_H_
 
+#include "Parser/WarpXParserWrapper.H"
 #include "Utils/WarpXConst.H"
 #include "SpeciesPhysicalProperties.H"
 #include "Evolve/WarpXDtType.H"
 
+#ifdef WARPX_QED
+#    include "ElementaryProcess/QEDInternals/QuantumSyncEngineWrapper.H"
+#    include "ElementaryProcess/QEDInternals/BreitWheelerEngineWrapper.H"
+#endif
+
 #include <AMReX_Particles.H>
 #include <AMReX_AmrCore.H>
 
-#ifdef WARPX_QED
-    #include <QuantumSyncEngineWrapper.H>
-    #include <BreitWheelerEngineWrapper.H>
-#endif
-
 #include <memory>
+
 
 enum struct ConvertDirection{WarpX_to_SI, SI_to_WarpX};
 
@@ -30,7 +32,7 @@ struct PIdx
 {
     enum { // Particle Attributes stored in amrex::ParticleContainer's struct of array
         w = 0,  // weight
-        ux, uy, uz, Ex, Ey, Ez, Bx, By, Bz,
+        ux, uy, uz,
 #ifdef WARPX_DIM_RZ
         theta, // RZ needs all three position components
 #endif
@@ -63,14 +65,8 @@ namespace ParticleStringNames
         {"ux",    PIdx::ux   },
         {"uy",    PIdx::uy   },
         {"uz",    PIdx::uz   },
-        {"Ex",    PIdx::Ex   },
-        {"Ey",    PIdx::Ey   },
-        {"Ez",    PIdx::Ez   },
-        {"Bx",    PIdx::Bx   },
-        {"By",    PIdx::By   },
-        {"Bz",    PIdx::Bz   }
 #ifdef WARPX_DIM_RZ
-        ,{"theta", PIdx::theta}
+        {"theta", PIdx::theta}
 #endif
     };
 }
@@ -82,6 +78,8 @@ public:
     using amrex::ParIter<0,0,PIdx::nattribs>::ParIter;
 
     WarpXParIter (ContainerType& pc, int level);
+
+    WarpXParIter (ContainerType& pc, int level, amrex::MFItInfo& info);
 
     const std::array<RealVector, PIdx::nattribs>& GetAttribs () const {
         return GetStructOfArrays().GetRealData();
@@ -126,9 +124,7 @@ class MultiParticleContainer;
  * push.
  *
  * Note: many functions are pure virtual (meaning they MUST be defined in
- * derived classes, e.g., Evolve) or empty function (meaning they
- * do not do anything, e.g., FieldGather, meant to be overriden by derived
- * function) or actual functions (e.g. CurrentDeposition).
+ * derived classes, e.g., Evolve) or actual functions (e.g. CurrentDeposition).
  */
 class WarpXParticleContainer
     : public amrex::ParticleContainer<0,0,PIdx::nattribs>
@@ -152,14 +148,6 @@ public:
     virtual ~WarpXParticleContainer() {}
 
     virtual void InitData () = 0;
-
-    virtual void FieldGatherES (const amrex::Vector<std::array<std::unique_ptr<amrex::MultiFab>, 3> >& E,
-                                const amrex::Vector<std::unique_ptr<amrex::FabArray<amrex::BaseFab<int> > > >& masks) {}
-
-    virtual void FieldGather (int lev,
-                              const amrex::MultiFab& Ex, const amrex::MultiFab& Ey,
-                              const amrex::MultiFab& Ez, const amrex::MultiFab& Bx,
-                              const amrex::MultiFab& By, const amrex::MultiFab& Bz) {}
 
     /**
      * Evolve is the central WarpXParticleContainer function that advances
@@ -270,6 +258,8 @@ public:
 
     static void ReadParameters ();
 
+    static void BackwardCompatibility ();
+
     static int NextID () { return ParticleType::NextID(); }
 
     void setNextID(int next_id) { ParticleType::NextID(next_id); }
@@ -287,12 +277,14 @@ public:
     void AddRealComp (const std::string& name, bool comm=true)
     {
         particle_comps[name] = NumRealComps();
+        particle_runtime_comps[name] = NumRealComps() - PIdx::nattribs;
         AddRealComp(comm);
     }
 
     void AddIntComp (const std::string& name, bool comm=true)
     {
         particle_icomps[name] = NumIntComps();
+        particle_runtime_icomps[name] = NumIntComps() - 0;
         AddIntComp(comm);
     }
 
@@ -300,6 +292,8 @@ public:
 
     std::map<std::string, int> getParticleComps () const noexcept { return particle_comps;}
     std::map<std::string, int> getParticleiComps () const noexcept { return particle_icomps;}
+    std::map<std::string, int> getParticleRuntimeComps () const noexcept { return particle_runtime_comps;}
+    std::map<std::string, int> getParticleRuntimeiComps () const noexcept { return particle_runtime_icomps;}
 
     //amrex::Real getCharge () {return charge;}
     amrex::ParticleReal getCharge () const {return charge;}
@@ -309,10 +303,43 @@ public:
     virtual void PulsarParticleInjection () {};
     virtual void PulsarParticleRemoval () {};
 #endif
+
+    int DoFieldIonization() const { return do_field_ionization; };
+    int DoQED() const {
+#ifdef WARPX_QED
+        return m_do_qed;
+#else
+        return false;
+#endif
+    };
+    //Species for which QED effects are relevant should override these methods
+    virtual bool has_quantum_sync() const {return false;};
+    virtual bool has_breit_wheeler() const {return false;};
+
+    // build filter functors
+    bool m_do_random_filter  = false;
+    bool m_do_uniform_filter = false;
+    bool m_do_parser_filter  = false;
+    amrex::Real m_random_fraction = 1.0;
+    int m_uniform_stride = 1;
+    std::unique_ptr<ParserWrapper<7>> m_particle_filter_parser;
+
+    /* \brief This function tests if the current species
+    *  is of a given PhysicalSpecies (specified as a template parameter).
+    * @tparam PhysSpec the PhysicalSpecies to test against
+    * @return the result of the test
+    */
+    template<PhysicalSpecies PhysSpec>
+    bool AmIA () const noexcept {return (physical_species == PhysSpec);}
+
+    amrex::Array<amrex::Real,3> get_v_galilean () {return v_galilean;}
+
 protected:
     amrex::Array<amrex::Real,3> v_galilean = {{0}};
     std::map<std::string, int> particle_comps;
     std::map<std::string, int> particle_icomps;
+    std::map<std::string, int> particle_runtime_comps;
+    std::map<std::string, int> particle_runtime_icomps;
 
     int species_id;
 
@@ -352,36 +379,34 @@ protected:
 #ifdef WARPX_QED
     bool m_do_qed = false;
 
-    //Species for which QED effects are relevant should override these methods
-    virtual bool has_quantum_sync(){return false;};
-    virtual bool has_breit_wheeler(){return false;};
-
     //Species can receive a shared pointer to a QED engine (species for
     //which this is relevant should override these functions)
     virtual void
     set_breit_wheeler_engine_ptr(std::shared_ptr<BreitWheelerEngine>){};
     virtual void
     set_quantum_sync_engine_ptr(std::shared_ptr<QuantumSynchrotronEngine>){};
-#endif
 
+    int m_qed_breit_wheeler_ele_product;
+    std::string m_qed_breit_wheeler_ele_product_name;
+    int m_qed_breit_wheeler_pos_product;
+    std::string m_qed_breit_wheeler_pos_product_name;
+    int m_qed_quantum_sync_phot_product;
+    std::string m_qed_quantum_sync_phot_product_name;
+
+#endif
     amrex::Vector<amrex::FArrayBox> local_rho;
     amrex::Vector<amrex::FArrayBox> local_jx;
     amrex::Vector<amrex::FArrayBox> local_jy;
     amrex::Vector<amrex::FArrayBox> local_jz;
 
+public:
     using DataContainer = amrex::Gpu::ManagedDeviceVector<amrex::ParticleReal>;
     using PairIndex = std::pair<int, int>;
+    using TmpParticleTile = std::array<DataContainer, TmpIdx::nattribs>;
+    using TmpParticles = amrex::Vector<std::map<PairIndex, TmpParticleTile> >;
 
-    // Whether to dump particle quantities.
-    // If true, particle position is always dumped.
-    int plot_species = 1;
-    // For all particle attribs (execept position), whether or not
-    // to dump to file.
-    amrex::Vector<int> plot_flags;
-    // list of names of attributes to dump.
-    amrex::Vector<std::string> plot_vars;
-
-    amrex::Vector<std::map<PairIndex, std::array<DataContainer, TmpIdx::nattribs> > > tmp_particle_data;
+protected:
+    TmpParticles tmp_particle_data;
 
     /**
      * When using runtime components, AMReX requires to touch all tiles

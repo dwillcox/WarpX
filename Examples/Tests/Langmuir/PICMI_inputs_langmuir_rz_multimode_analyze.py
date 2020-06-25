@@ -10,6 +10,25 @@ from pywarpx import picmi
 
 constants = picmi.constants
 
+##########################
+# physics parameters
+##########################
+
+density = 2.e24
+epsilon0 = 0.001*constants.c
+epsilon1 = 0.001*constants.c
+epsilon2 = 0.001*constants.c
+w0 = 5.e-6
+n_osc_z = 3
+
+# Plasma frequency
+wp = np.sqrt((density*constants.q_e**2)/(constants.m_e*constants.ep0))
+kp = wp/constants.c
+
+##########################
+# numerics parameters
+##########################
+
 nr = 64
 nz = 200
 
@@ -18,20 +37,14 @@ zmin =  0.e0
 rmax = +20.e-6
 zmax = +40.e-6
 
-# Parameters describing particle distribution
-density = 2.e24
-epsilon0 = 0.001*constants.c
-epsilon1 = 0.001*constants.c
-epsilon2 = 0.001*constants.c
-w0 = 5.e-6
-n_osc_z = 3
-
 # Wave vector of the wave
 k0 = 2.*np.pi*n_osc_z/(zmax - zmin)
 
-# Plasma frequency
-wp = np.sqrt((density*constants.q_e**2)/(constants.m_e*constants.ep0))
-kp = wp/constants.c
+diagnostic_interval = 40
+
+##########################
+# physics components
+##########################
 
 uniform_plasma = picmi.UniformDistribution(density = density,
                                            upper_bound = [+18e-6, +18e-6, None],
@@ -63,6 +76,10 @@ analytic_plasma = picmi.AnalyticDistribution(density_expression = density,
 electrons = picmi.Species(particle_type='electron', name='electrons', initial_distribution=analytic_plasma)
 protons = picmi.Species(particle_type='proton', name='protons', initial_distribution=uniform_plasma)
 
+##########################
+# numerics components
+##########################
+
 grid = picmi.CylindricalGrid(number_of_cells = [nr, nz],
                              n_azimuthal_modes = 3,
                              lower_bound = [rmin, zmin],
@@ -72,18 +89,44 @@ grid = picmi.CylindricalGrid(number_of_cells = [nr, nz],
                              moving_window_zvelocity = 0.,
                              warpx_max_grid_size=64)
 
-solver = picmi.ElectromagneticSolver(grid=grid, cfl=1.)
+solver = picmi.ElectromagneticSolver(grid=grid, cfl=1., warpx_do_pml=0)
+
+##########################
+# diagnostics
+##########################
+
+field_diag1 = picmi.FieldDiagnostic(name = 'diag1',
+                                    grid = grid,
+                                    period = diagnostic_interval,
+                                    data_list = ['Ex', 'Ez', 'By', 'Jx', 'Jz', 'part_per_cell'],
+                                    write_dir = '.',
+                                    warpx_file_prefix = 'Python_Langmuir_rz_multimode_plt')
+
+part_diag1 = picmi.ParticleDiagnostic(name = 'diag1',
+                                      period = diagnostic_interval,
+                                      species = [electrons],
+                                      data_list = ['weighting', 'momentum'])
+
+##########################
+# simulation setup
+##########################
 
 sim = picmi.Simulation(solver = solver,
                        max_steps = 40,
                        verbose = 1,
-                       warpx_plot_int = 40,
                        warpx_current_deposition_algo = 'esirkepov',
                        warpx_field_gathering_algo = 'energy-conserving',
                        warpx_particle_pusher_algo = 'boris')
 
 sim.add_species(electrons, layout=picmi.GriddedLayout(n_macroparticle_per_cell=[2,16,2], grid=grid))
 sim.add_species(protons, layout=picmi.GriddedLayout(n_macroparticle_per_cell=[2,16,2], grid=grid))
+
+sim.add_diagnostic(field_diag1)
+sim.add_diagnostic(part_diag1)
+
+##########################
+# simulation run
+##########################
 
 # write_inputs will create an inputs file that can be used to run
 # with the compiled version.
@@ -129,44 +172,62 @@ def calcEz( z, r, k0, w0, wp, t, epsilons) :
             np.exp( -r**2/w0**2 ) * np.cos( k0*z ) * np.sin( wp*t ))
     return( Ez_array )
 
-# Get node centered coordinates
-dr = (rmax - rmin)/nr
-dz = (zmax - zmin)/nz
-coords = np.indices([nr+1, nz+1], 'd')
-rr = rmin + coords[0]*dr
-zz = zmin + coords[1]*dz
-
 # Current time of the simulation
 t0 = pywarpx._libwarpx.libwarpx.warpx_gett_new(0)
 
 # Get the raw field data. Note that these are the real and imaginary
 # parts of the fields for each azimuthal mode.
-Ex_sim_modes = ExWrapper()[...]
-Ez_sim_modes = EzWrapper()[...]
+Ex_sim_wrap = ExWrapper()
+Ez_sim_wrap = EzWrapper()
+Ex_sim_modes = Ex_sim_wrap[...]
+Ez_sim_modes = Ez_sim_wrap[...]
+
+rr_Er = Ex_sim_wrap.mesh('r')
+zz_Er = Ex_sim_wrap.mesh('z')
+rr_Ez = Ez_sim_wrap.mesh('r')
+zz_Ez = Ez_sim_wrap.mesh('z')
+
+rr_Er = rr_Er[:,np.newaxis]*np.ones(zz_Er.shape[0])[np.newaxis,:]
+zz_Er = zz_Er[np.newaxis,:]*np.ones(rr_Er.shape[0])[:,np.newaxis]
+rr_Ez = rr_Ez[:,np.newaxis]*np.ones(zz_Ez.shape[0])[np.newaxis,:]
+zz_Ez = zz_Ez[np.newaxis,:]*np.ones(rr_Ez.shape[0])[:,np.newaxis]
 
 # Sum the real components to get the field along x-axis (theta = 0)
 Er_sim = Ex_sim_modes[:,:,0] + np.sum(Ex_sim_modes[:,:,1::2], axis=2)
 Ez_sim = Ez_sim_modes[:,:,0] + np.sum(Ez_sim_modes[:,:,1::2], axis=2)
 
 # The analytical solutions
-Er_th = calcEr(zz[:-1,:], rr[:-1,:] + dr/2., k0, w0, wp, t0, [epsilon0, epsilon1, epsilon2])
-Ez_th = calcEz(zz[:,:-1] + dz/2., rr[:,:-1], k0, w0, wp, t0, [epsilon0, epsilon1, epsilon2])
+Er_th = calcEr(zz_Er, rr_Er, k0, w0, wp, t0, [epsilon0, epsilon1, epsilon2])
+Ez_th = calcEz(zz_Ez, rr_Ez, k0, w0, wp, t0, [epsilon0, epsilon1, epsilon2])
 
 max_error_Er = abs(Er_sim - Er_th).max()/abs(Er_th).max()
 max_error_Ez = abs(Ez_sim - Ez_th).max()/abs(Ez_th).max()
 print("Max error Er %e"%max_error_Er)
 print("Max error Ez %e"%max_error_Ez)
 
-# Plot the last field from the loop (Ez at iteration 40)
-plt.subplot2grid( (1,2), (0,0) )
-plt.imshow( Ez_sim )
-plt.colorbar()
-plt.title('Ez, last iteration\n(simulation)')
-plt.subplot2grid( (1,2), (0,1) )
-plt.imshow( Ez_th )
-plt.colorbar()
-plt.title('Ez, last iteration\n(theory)')
-plt.tight_layout()
-plt.savefig('langmuir_multi_rz_multimode_analysis.png')
+# Plot the last field from the loop (Er at iteration 40)
+fig, ax = plt.subplots(3)
+im = ax[0].imshow( Er_sim, aspect='auto', origin='lower' )
+fig.colorbar(im, ax=ax[0], orientation='vertical')
+ax[0].set_title('Er, last iteration (simulation)')
+ax[1].imshow( Er_th, aspect='auto', origin='lower' )
+fig.colorbar(im, ax=ax[1], orientation='vertical')
+ax[1].set_title('Er, last iteration (theory)')
+im = ax[2].imshow( (Er_sim - Er_th)/abs(Er_th).max(), aspect='auto', origin='lower' )
+fig.colorbar(im, ax=ax[2], orientation='vertical')
+ax[2].set_title('Er, last iteration (difference)')
+plt.savefig('langmuir_multi_rz_multimode_analysis_Er.png')
+
+fig, ax = plt.subplots(3)
+im = ax[0].imshow( Ez_sim, aspect='auto', origin='lower' )
+fig.colorbar(im, ax=ax[0], orientation='vertical')
+ax[0].set_title('Ez, last iteration (simulation)')
+ax[1].imshow( Ez_th, aspect='auto', origin='lower' )
+fig.colorbar(im, ax=ax[1], orientation='vertical')
+ax[1].set_title('Ez, last iteration (theory)')
+im = ax[2].imshow( (Ez_sim - Ez_th)/abs(Ez_th).max(), aspect='auto', origin='lower' )
+fig.colorbar(im, ax=ax[2], orientation='vertical')
+ax[2].set_title('Ez, last iteration (difference)')
+plt.savefig('langmuir_multi_rz_multimode_analysis_Ez.png')
 
 assert max(max_error_Er, max_error_Ez) < 0.02

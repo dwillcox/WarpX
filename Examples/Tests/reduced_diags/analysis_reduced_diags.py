@@ -7,7 +7,7 @@
 # License: BSD-3-Clause-LBNL
 
 # This script tests the reduced diagnostics.
-# The setup is a uniform plasma with electrons and protons.
+# The setup is a uniform plasma with electrons, protons and photons.
 # Particle energy and field energy will be outputed
 # using the reduced diagnostics.
 # And they will be compared with the data in the plotfiles.
@@ -23,6 +23,8 @@ import sys
 import yt
 import numpy as np
 import scipy.constants as scc
+sys.path.insert(1, '../../../../warpx/Regression/Checksum/')
+import checksumAPI
 
 fn = sys.argv[1]
 
@@ -44,6 +46,13 @@ py = ad['protons','particle_momentum_y'].to_ndarray()
 pz = ad['protons','particle_momentum_z'].to_ndarray()
 w  = ad['protons','particle_weight'].to_ndarray()
 EPyt = EPyt + np.sum( (np.sqrt((px**2+py**2+pz**2)*scc.c**2+scc.m_p**2*scc.c**4)-scc.m_p*scc.c**2)*w )
+
+# photon
+px = ad['photons','particle_momentum_x'].to_ndarray()
+py = ad['photons','particle_momentum_y'].to_ndarray()
+pz = ad['photons','particle_momentum_z'].to_ndarray()
+w  = ad['photons','particle_weight'].to_ndarray()
+EPyt = EPyt + np.sum( (np.sqrt(px**2+py**2+pz**2)*scc.c)*w )
 
 ad = ds.covering_grid(level=0, left_edge=ds.domain_left_edge, dims=ds.domain_dimensions)
 Ex = ad['Ex'].to_ndarray()
@@ -74,3 +83,6 @@ print('tolerance of particle energy:', 1.0e-8)
 
 assert(abs(EFyt-EF) < 1.0e-3)
 assert(abs(EPyt-EP) < 1.0e-8)
+
+test_name = fn[:-9] # Could also be os.path.split(os.getcwd())[1]
+checksumAPI.evaluate_checksum(test_name, fn)

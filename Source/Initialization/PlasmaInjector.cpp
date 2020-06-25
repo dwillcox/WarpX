@@ -8,15 +8,18 @@
  * License: BSD-3-Clause-LBNL
  */
 #include "PlasmaInjector.H"
-#include "SpeciesPhysicalProperties.H"
+#include "Particles/SpeciesPhysicalProperties.H"
 #include "Utils/WarpXConst.H"
 #include "Utils/WarpXUtil.H"
 #include "WarpX.H"
 
 #include <AMReX.H>
+#include <AMReX_ParallelDescriptor.H>
+#include <AMReX_Print.H>
 
-#include <sstream>
 #include <functional>
+#include <sstream>
+#include <string>
 
 
 using namespace amrex;
@@ -76,7 +79,7 @@ PlasmaInjector::PlasmaInjector (int ispecies, const std::string& name)
     pp.query("radially_weighted", radially_weighted);
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(radially_weighted, "ERROR: Only radially_weighted=true is supported");
 
-    // parse plasma boundaries
+    // Unlimited boundaries
     xmin = std::numeric_limits<amrex::Real>::lowest();
     ymin = std::numeric_limits<amrex::Real>::lowest();
     zmin = std::numeric_limits<amrex::Real>::lowest();
@@ -84,6 +87,30 @@ PlasmaInjector::PlasmaInjector (int ispecies, const std::string& name)
     xmax = std::numeric_limits<amrex::Real>::max();
     ymax = std::numeric_limits<amrex::Real>::max();
     zmax = std::numeric_limits<amrex::Real>::max();
+
+    // NOTE: When periodic boundaries are used, default injection range is set to mother grid dimensions.
+    const Geometry& geom = WarpX::GetInstance().Geom(0);
+    if( geom.isPeriodic(0) ) {
+        xmin = geom.ProbLo(0);
+        xmax = geom.ProbHi(0);
+    }
+
+    if( geom.isPeriodic(1) ) {
+#       ifndef WARPX_DIM_3D
+        zmin = geom.ProbLo(1);
+        zmax = geom.ProbHi(1);
+#       else
+        ymin = geom.ProbLo(1);
+        ymax = geom.ProbHi(1);
+#       endif
+    }
+
+#   ifdef WARPX_DIM_3D
+    if( geom.isPeriodic(2) ) {
+        zmin = geom.ProbLo(2);
+        zmax = geom.ProbHi(2);
+    }
+#   endif
 
     pp.query("xmin", xmin);
     pp.query("ymin", ymin);
@@ -105,9 +132,15 @@ PlasmaInjector::PlasmaInjector (int ispecies, const std::string& name)
         mass = species::get_mass( physical_species );
     }
 
+    std::string s_inj_style;
+    pp.query("injection_style", s_inj_style);
+
     // parse charge and mass
     std::string charge_s;
+    std::string mass_s;
     bool charge_is_specified = pp.query("charge", charge_s);
+    bool mass_is_specified = pp.query("mass", mass_s);
+
     if (charge_is_specified){
         std::transform(charge_s.begin(),
                        charge_s.end(),
@@ -116,15 +149,15 @@ PlasmaInjector::PlasmaInjector (int ispecies, const std::string& name)
         charge = parseChargeString(pp, charge_s);
     }
     if ( charge_is_specified && species_is_specified ){
-        Print()<<"WARNING: Both <species>.charge and <species>species_type specified\n";
-        Print()<<"         The charge in <species>.mass overwrite the one from <species>.species_type\n";
+        Print() << "WARNING: Both '" << species_name << ".charge' and "
+                << species_name << ".species_type' are specified\n'"
+                << species_name << ".charge' will take precedence.\n";
     }
-    if (!charge_is_specified && !species_is_specified){
+    if (!charge_is_specified && !species_is_specified && s_inj_style != "external_file"){
+        // external file will throw own assertions below if charge cannot be found
         amrex::Abort("Need to specify at least one of species_type or charge");
     }
 
-    std::string mass_s;
-    bool mass_is_specified = pp.query("mass", mass_s);
     if (mass_is_specified){
         std::transform(mass_s.begin(),
                        mass_s.end(),
@@ -133,10 +166,12 @@ PlasmaInjector::PlasmaInjector (int ispecies, const std::string& name)
         mass = parseMassString(pp, mass_s);
     }
     if ( mass_is_specified && species_is_specified ){
-        Print()<<"WARNING: Both <species>.mass and <species>species_type specified\n";
-        Print()<<"         The mass in <species>.mass overwrite the one from <species>.species_type\n";
+        Print() << "WARNING: Both '" << species_name << ".mass' and "
+                << species_name << ".species_type' are specified\n'"
+                << species_name << ".mass' will take precedence.\n";
     }
-    if (!mass_is_specified && !species_is_specified){
+    if (!mass_is_specified && !species_is_specified && s_inj_style != "external_file"){
+        // external file will throw own assertions below if mass cannot be found
         amrex::Abort("Need to specify at least one of species_type or mass");
     }
 
@@ -166,6 +201,9 @@ PlasmaInjector::PlasmaInjector (int ispecies, const std::string& name)
         pp.get("x_rms", x_rms);
         pp.get("y_rms", y_rms);
         pp.get("z_rms", z_rms);
+        pp.query("x_cut", x_cut);
+        pp.query("y_cut", y_cut);
+        pp.query("z_cut", z_cut);
         pp.get("q_tot", q_tot);
         pp.get("npart", npart);
         pp.query("do_symmetrize", do_symmetrize);
@@ -177,6 +215,13 @@ PlasmaInjector::PlasmaInjector (int ispecies, const std::string& name)
     // InjectorPosition[Random or Regular].getPositionUnitBox.
     else if (part_pos_s == "nrandompercell") {
         pp.query("num_particles_per_cell", num_particles_per_cell);
+#if WARPX_DIM_RZ
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+            num_particles_per_cell>=2*WarpX::n_rz_azimuthal_modes,
+            "Error: For accurate use of WarpX cylindrical gemoetry the number "
+            "of particles should be at least two times n_rz_azimuthal_modes "
+            "(Please visit PR#765 for more information.)");
+#endif
         // Construct InjectorPosition with InjectorPositionRandom.
         inj_pos.reset(new InjectorPosition((InjectorPositionRandom*)nullptr,
                                            xmin, xmax, ymin, ymax, zmin, zmax));
@@ -190,6 +235,13 @@ PlasmaInjector::PlasmaInjector (int ispecies, const std::string& name)
 #if WARPX_DIM_XZ
         num_particles_per_cell_each_dim[2] = 1;
 #endif
+#if WARPX_DIM_RZ
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+            num_particles_per_cell_each_dim[1]>=2*WarpX::n_rz_azimuthal_modes,
+            "Error: For accurate use of WarpX cylindrical gemoetry the number "
+            "of particles in the theta direction should be at least two times "
+            "n_rz_azimuthal_modes (Please visit PR#765 for more information.)");
+#endif
         // Construct InjectorPosition from InjectorPositionRegular.
         inj_pos.reset(new InjectorPosition((InjectorPositionRegular*)nullptr,
                                            xmin, xmax, ymin, ymax, zmin, zmax,
@@ -201,6 +253,96 @@ PlasmaInjector::PlasmaInjector (int ispecies, const std::string& name)
                                  num_particles_per_cell_each_dim[2];
         parseDensity(pp);
         parseMomentum(pp);
+    } else if (part_pos_s == "external_file") {
+#ifdef WARPX_DIM_RZ
+        amrex::Abort("The option of reading particle data from an external "
+                     "file has not been implemented nor tested in RZ geometry");
+#endif
+        pp.query("q_tot", q_tot); // optional
+#ifndef WARPX_USE_OPENPMD
+        amrex::Abort("WarpX has to be compiled with USE_OPENPMD=TRUE to be able"
+                     " to read the external openPMD file with species data");
+#endif
+        external_file = true;
+        std::string str_injection_file;
+        pp.get("injection_file", str_injection_file);
+
+#ifdef WARPX_USE_OPENPMD
+        if (ParallelDescriptor::IOProcessor()) {
+            m_openpmd_input_series = std::make_unique<openPMD::Series>(
+                str_injection_file, openPMD::AccessType::READ_ONLY);
+
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_openpmd_input_series->iterations.size() == 1u,
+                "External file should contain only 1 iteration\n");
+            openPMD::Iteration it = m_openpmd_input_series->iterations.begin()->second;
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                it.particles.size() == 1u,
+                "External file should contain only 1 species\n");
+            std::string const ps_name = it.particles.begin()->first;
+            openPMD::ParticleSpecies ps = it.particles.begin()->second;
+
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                ps.contains("charge") || charge_is_specified || species_is_specified,
+                std::string("'") + ps_name +
+                ".injection_file' does not contain a 'charge' species record. "
+                "Please specify '" + ps_name + ".charge' or "
+                "'" + ps_name + ".species_type' in your input file!\n");
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                ps.contains("mass") || mass_is_specified || species_is_specified,
+                std::string("'") + ps_name +
+                ".injection_file' does not contain a 'mass' species record. "
+                "Please specify '" + ps_name + ".mass' or "
+                "'" + ps_name + ".species_type' in your input file!\n");
+
+            if (charge_is_specified) {
+                Print() << "WARNING: Both '" << ps_name << ".charge' and '"
+                        << ps_name << ".injection_file' specify a charge.\n'"
+                        << ps_name << ".charge' will take precedence.\n";
+            }
+            else if (species_is_specified) {
+                Print() << "WARNING: Both '" << ps_name << ".species_type' and '"
+                        << ps_name << ".injection_file' specify a charge.\n'"
+                        << ps_name << ".species_type' will take precedence.\n";
+            }
+            else {
+                // TODO: Add ASSERT_WITH_MESSAGE to test if charge is a constant record
+                ParticleReal const p_q = ps["charge"][openPMD::RecordComponent::SCALAR].loadChunk<ParticleReal>().get()[0];
+                double const charge_unit = ps["charge"][openPMD::RecordComponent::SCALAR].unitSI();
+                charge = p_q * charge_unit;
+            }
+            if (mass_is_specified) {
+                Print() << "WARNING: Both '" << ps_name << ".mass' and '"
+                        << ps_name << ".injection_file' specify a mass.\n'"
+                        << ps_name << ".mass' will take precedence.\n";
+            }
+            else if (species_is_specified) {
+                Print() << "WARNING: Both '" << ps_name << ".species_type' and '"
+                        << ps_name << ".injection_file' specify a mass.\n'"
+                        << ps_name << ".species_type' will take precedence.\n";
+            }
+            else {
+                // TODO: Add ASSERT_WITH_MESSAGE to test if mass is a constant record
+                ParticleReal const p_m = ps["mass"][openPMD::RecordComponent::SCALAR].loadChunk<ParticleReal>().get()[0];
+                double const mass_unit = ps["mass"][openPMD::RecordComponent::SCALAR].unitSI();
+                mass = p_m * mass_unit;
+            }
+
+            pp.query("z_shift",z_shift);
+        } // IOProcessor
+
+        // Broadcast charge and mass to non-IO processors
+        if (!charge_is_specified && !species_is_specified)
+            ParallelDescriptor::Bcast(&charge, 1,
+                ParallelDescriptor::IOProcessorNumber());
+        if (!mass_is_specified && !species_is_specified)
+            ParallelDescriptor::Bcast(&mass, 1,
+                ParallelDescriptor::IOProcessorNumber());
+#else
+        Abort("Plasma injection via external_file requires openPMD support: "
+                     "Add USE_OPENPMD=TRUE when compiling WarpX.\n");
+#endif  // WARPX_USE_OPENPMD
+
     } else {
         StringParseAbortMessage("Injection style", part_pos_s);
     }
@@ -232,7 +374,12 @@ void PlasmaInjector::parseDensity (ParmParse& pp)
         inj_rho.reset(new InjectorDensity((InjectorDensityParser*)nullptr,
                                           makeParser(str_density_function,{"x","y","z"})));
     } else {
-        StringParseAbortMessage("Density profile type", rho_prof_s);
+        //No need for profile definition if external file is used
+        std::string s_inj_style;
+        pp.query("injection_style", s_inj_style);
+        if (s_inj_style != "external_file") {
+            StringParseAbortMessage("Density profile type", rho_prof_s);
+        }
     }
 }
 
@@ -357,7 +504,12 @@ void PlasmaInjector::parseMomentum (ParmParse& pp)
                                            makeParser(str_momentum_function_uy,{"x","y","z"}),
                                            makeParser(str_momentum_function_uz,{"x","y","z"})));
     } else {
-        StringParseAbortMessage("Momentum distribution type", mom_dist_s);
+        //No need for momentum definition if external file is used
+        std::string s_inj_style;
+        pp.query("injection_style", s_inj_style);
+        if (s_inj_style != "external_file") {
+            StringParseAbortMessage("Momentum distribution type", mom_dist_s);
+        }
     }
 }
 

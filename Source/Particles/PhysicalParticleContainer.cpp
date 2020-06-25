@@ -1,8 +1,8 @@
 /* Copyright 2019-2020 Andrew Myers, Aurore Blelly, Axel Huebl
  * David Grote, Glenn Richardson, Jean-Luc Vay
  * Ligia Diana Amorim, Luca Fedeli, Maxence Thevenet
- * Remi Lehe, Revathi Jambunathan, Weiqun Zhang
- * Yinjian Zhao
+ * Michael Rowan, Remi Lehe, Revathi Jambunathan
+ * Weiqun Zhang, Yinjian Zhao
  *
  * This file is part of WarpX.
  *
@@ -11,25 +11,28 @@
 #include "PhysicalParticleContainer.H"
 
 #include "MultiParticleContainer.H"
-#include "FortranInterface/WarpX_f.H"
 #include "WarpX.H"
 #include "Utils/WarpXConst.H"
+#include "Utils/WarpXUtil.H"
 #include "Python/WarpXWrappers.h"
 #include "Utils/IonizationEnergiesTable.H"
 #include "Particles/Gather/FieldGather.H"
 #include "Particles/Pusher/GetAndSetPosition.H"
-
+#include "Particles/Pusher/CopyParticleAttribs.H"
+#include "Particles/Pusher/PushSelector.H"
+#include "Particles/Gather/GetExternalFields.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
-// Import low-level single-particle kernels
-#include "Particles/Pusher/UpdatePosition.H"
-#include "Particles/Pusher/UpdateMomentumBoris.H"
-#include "Particles/Pusher/UpdateMomentumVay.H"
-#include "Particles/Pusher/UpdateMomentumBorisWithRadiationReaction.H"
-#include "Particles/Pusher/UpdateMomentumHigueraCary.H"
+#include <AMReX_Print.H>
 
+#ifdef WARPX_USE_OPENPMD
+#   include <openPMD/openPMD.hpp>
+#endif
+
+#include <cmath>
 #include <limits>
 #include <sstream>
+#include <string>
 
 
 #ifdef PULSAR
@@ -43,6 +46,8 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
     : WarpXParticleContainer(amr_core, ispecies),
       species_name(name)
 {
+    BackwardCompatibility();
+
     plasma_injector.reset(new PlasmaInjector(species_id, species_name));
     physical_species = plasma_injector->getPhysicalSpecies();
     charge = plasma_injector->getCharge();
@@ -73,9 +78,13 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
     pp.query("do_classical_radiation_reaction", do_classical_radiation_reaction);
     //if the species is not a lepton, do_classical_radiation_reaction
     //should be false
-    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
-        !(do_classical_radiation_reaction && !AmIALepton()),
-        "Can't enable classical radiation reaction for non lepton species. " );
+    WarpXUtilMsg::AlwaysAssert(
+        !(do_classical_radiation_reaction &&
+        !(AmIA<PhysicalSpecies::electron>() ||
+        AmIA<PhysicalSpecies::positron>() )),
+        "ERROR: can't enable classical radiation reaction for non lepton species '"
+        + species_name + "'."
+    );
 
     //Only Boris pusher is compatible with radiation reaction
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -96,52 +105,13 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
             AddRealComp("optical_depth_BW");
     }
 
-    //TODO: SHOULD CHECK IF SPECIES IS EITHER ELECTRONS OR POSITRONS!!
-#endif
-
-    //variable to set plot_flags size
-    int plot_flag_size = PIdx::nattribs;
-    if(WarpX::do_back_transformed_diagnostics && do_back_transformed_diagnostics)
-        plot_flag_size += 6;
-
-#ifdef WARPX_QED
-    if(m_do_qed){
-        // plot_flag will have an entry for the optical depth
-        plot_flag_size++;
+    if(m_do_qed_quantum_sync){
+        pp.get("qed_quantum_sync_phot_product_species",
+            m_qed_quantum_sync_phot_product_name);
     }
+
+
 #endif
-    //_______________________________
-
-    pp.query("plot_species", plot_species);
-    int do_user_plot_vars;
-    do_user_plot_vars = pp.queryarr("plot_vars", plot_vars);
-    if (not do_user_plot_vars){
-        // By default, all particle variables are dumped to plotfiles,
-        // including {x,y,z,ux,uy,uz}old variables when running in a
-        // boosted frame
-        plot_flags.resize(plot_flag_size, 1);
-    } else {
-        // Set plot_flag to 0 for all attribs
-        plot_flags.resize(plot_flag_size, 0);
-
-        // If not none, set plot_flags values to 1 for elements in plot_vars.
-        if (plot_vars[0] != "none"){
-            for (const auto& var : plot_vars){
-                // Return error if var not in PIdx.
-                AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
-                    ParticleStringNames::to_index.count(var),
-                    "plot_vars argument not in ParticleStringNames");
-                plot_flags[ParticleStringNames::to_index.at(var)] = 1;
-            }
-        }
-
-#ifdef WARPX_DIM_RZ
-        // Always write out theta, whether or not it's requested,
-        // to be consistent with always writing out r and z.
-        plot_flags[ParticleStringNames::to_index.at("theta")] = 1;
-#endif
-
-    }
 
     // Parse galilean velocity
     ParmParse ppsatd("psatd");
@@ -149,12 +119,19 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
     // Scale the velocity by the speed of light
     for (int i=0; i<3; i++) v_galilean[i] *= PhysConst::c;
 
-    #ifdef WARPX_QED
-        if(m_do_qed){
-            //Optical depths is always plotted if QED is on
-            plot_flags[plot_flag_size-1] = 1;
-        }
-    #endif
+    // build filter functors
+    m_do_random_filter  = pp.query("random_fraction", m_random_fraction);
+    m_do_uniform_filter = pp.query("uniform_stride",  m_uniform_stride);
+    std::string buf;
+    m_do_parser_filter  = pp.query("plot_filter_function(t,x,y,z,ux,uy,uz)", buf);
+    if (m_do_parser_filter) {
+        std::string function_string = "";
+        Store_parserString(pp,"plot_filter_function(t,x,y,z,ux,uy,uz)",
+                           function_string);
+        m_particle_filter_parser.reset(new ParserWrapper<7>(
+            makeParser(function_string,{"t","x","y","z","ux","uy","uz"})));
+    }
+
 }
 
 PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core)
@@ -163,7 +140,24 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core)
     plasma_injector.reset(new PlasmaInjector());
 }
 
-void PhysicalParticleContainer::InitData()
+void
+PhysicalParticleContainer::BackwardCompatibility ()
+{
+    ParmParse pps(species_name);
+    std::vector<std::string> backward_strings;
+    if (pps.queryarr("plot_vars", backward_strings)){
+        amrex::Abort("<species>.plot_vars is not supported anymore. "
+                     "Please use the new syntax for diagnostics, see documentation.");
+    }
+
+    int backward_int;
+    if (pps.query("plot_species", backward_int)){
+        amrex::Abort("<species>.plot_species is not supported anymore. "
+                     "Please use the new syntax for diagnostics, see documentation.");
+    }
+}
+
+void PhysicalParticleContainer::InitData ()
 {
     // Init ionization module here instead of in the PhysicalParticleContainer
     // constructor because dt is required
@@ -172,7 +166,8 @@ void PhysicalParticleContainer::InitData()
     Redistribute();  // We then redistribute
 }
 
-void PhysicalParticleContainer::MapParticletoBoostedFrame(Real& x, Real& y, Real& z, std::array<Real, 3>& u)
+void PhysicalParticleContainer::MapParticletoBoostedFrame (
+    Real& x, Real& y, Real& z, std::array<Real, 3>& u)
 {
     // Map the particles from the lab frame to the boosted frame.
     // This boosts the particle to the lab frame and calculates
@@ -219,20 +214,19 @@ void PhysicalParticleContainer::MapParticletoBoostedFrame(Real& x, Real& y, Real
 }
 
 void
-PhysicalParticleContainer::AddGaussianBeam(Real x_m, Real y_m, Real z_m,
-                                           Real x_rms, Real y_rms, Real z_rms,
-                                           Real q_tot, long npart,
-                                           int do_symmetrize) {
-
-    const Geometry& geom     = m_gdb->Geom(0);
-    RealBox containing_bx = geom.ProbDomain();
+PhysicalParticleContainer::AddGaussianBeam (
+    const Real x_m, const Real y_m, const Real z_m,
+    const Real x_rms, const Real y_rms, const Real z_rms,
+    const Real x_cut, const Real y_cut, const Real z_cut,
+    const Real q_tot, long npart,
+    const int do_symmetrize) {
 
     std::mt19937_64 mt(0451);
     std::normal_distribution<double> distx(x_m, x_rms);
     std::normal_distribution<double> disty(y_m, y_rms);
     std::normal_distribution<double> distz(z_m, z_rms);
 
-    // Allocate temporary vectors on the CPU
+    // Declare temporary vectors on the CPU
     Gpu::HostVector<ParticleReal> particle_x;
     Gpu::HostVector<ParticleReal> particle_y;
     Gpu::HostVector<ParticleReal> particle_z;
@@ -250,17 +244,20 @@ PhysicalParticleContainer::AddGaussianBeam(Real x_m, Real y_m, Real z_m,
         }
         for (long i = 0; i < npart; ++i) {
 #if (defined WARPX_DIM_3D) || (WARPX_DIM_RZ)
-            Real weight = q_tot/npart/charge;
-            Real x = distx(mt);
-            Real y = disty(mt);
-            Real z = distz(mt);
+            const Real weight = q_tot/(npart*charge);
+            const Real x = distx(mt);
+            const Real y = disty(mt);
+            const Real z = distz(mt);
 #elif (defined WARPX_DIM_XZ)
-            Real weight = q_tot/npart/charge/y_rms;
-            Real x = distx(mt);
-            Real y = 0.;
-            Real z = distz(mt);
+            const Real weight = q_tot/(npart*charge*y_rms);
+            const Real x = distx(mt);
+            constexpr Real y = 0.;
+            const Real z = distz(mt);
 #endif
-            if (plasma_injector->insideBounds(x, y, z)) {
+            if (plasma_injector->insideBounds(x, y, z)  &&
+                std::abs( x - x_m ) < x_cut * x_rms     &&
+                std::abs( y - y_m ) < y_cut * y_rms     &&
+                std::abs( z - z_m ) < z_cut * z_rms   ) {
                 XDim3 u = plasma_injector->getMomentum(x, y, z);
                 u.x *= PhysConst::c;
                 u.y *= PhysConst::c;
@@ -301,16 +298,117 @@ PhysicalParticleContainer::AddGaussianBeam(Real x_m, Real y_m, Real z_m,
 }
 
 void
-PhysicalParticleContainer::CheckAndAddParticle(Real x, Real y, Real z,
-                                               std::array<Real, 3> u,
-                                               Real weight,
-                                               Gpu::HostVector<ParticleReal>& particle_x,
-                                               Gpu::HostVector<ParticleReal>& particle_y,
-                                               Gpu::HostVector<ParticleReal>& particle_z,
-                                               Gpu::HostVector<ParticleReal>& particle_ux,
-                                               Gpu::HostVector<ParticleReal>& particle_uy,
-                                               Gpu::HostVector<ParticleReal>& particle_uz,
-                                               Gpu::HostVector<ParticleReal>& particle_w)
+PhysicalParticleContainer::AddPlasmaFromFile(ParticleReal q_tot,
+                                             ParticleReal z_shift)
+{
+    // Declare temporary vectors on the CPU
+    Gpu::HostVector<ParticleReal> particle_x;
+    Gpu::HostVector<ParticleReal> particle_z;
+    Gpu::HostVector<ParticleReal> particle_ux;
+    Gpu::HostVector<ParticleReal> particle_uz;
+    Gpu::HostVector<ParticleReal> particle_w;
+    Gpu::HostVector<ParticleReal> particle_y;
+    Gpu::HostVector<ParticleReal> particle_uy;
+
+#ifdef WARPX_USE_OPENPMD
+    //TODO: Make changes for read/write in multiple MPI ranks
+    if (ParallelDescriptor::IOProcessor()) {
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(plasma_injector,
+                                         "AddPlasmaFromFile: plasma injector not initialized.\n");
+        // take ownership of the series and close it when done
+        auto series = std::move(plasma_injector->m_openpmd_input_series);
+
+        // assumption asserts: see PlasmaInjector
+        openPMD::Iteration it = series->iterations.begin()->second;
+        std::string const ps_name = it.particles.begin()->first;
+        openPMD::ParticleSpecies ps = it.particles.begin()->second;
+
+        auto const npart = ps["position"]["x"].getExtent()[0];
+        std::shared_ptr<ParticleReal> ptr_x = ps["position"]["x"].loadChunk<ParticleReal>();
+        double const position_unit_x = ps["position"]["x"].unitSI();
+        std::shared_ptr<ParticleReal> ptr_z = ps["position"]["z"].loadChunk<ParticleReal>();
+        double const position_unit_z = ps["position"]["z"].unitSI();
+        std::shared_ptr<ParticleReal> ptr_ux = ps["momentum"]["x"].loadChunk<ParticleReal>();
+        double const momentum_unit_x = ps["momentum"]["x"].unitSI();
+        std::shared_ptr<ParticleReal> ptr_uz = ps["momentum"]["z"].loadChunk<ParticleReal>();
+        double const momentum_unit_z = ps["momentum"]["z"].unitSI();
+#   ifdef WARPX_DIM_3D
+        std::shared_ptr<ParticleReal> ptr_y = ps["position"]["y"].loadChunk<ParticleReal>();
+        double const position_unit_y = ps["position"]["y"].unitSI();
+#   endif
+        std::shared_ptr<ParticleReal> ptr_uy = nullptr;
+        double momentum_unit_y = 1.0;
+        if (ps["momentum"].contains("y")) {
+            ptr_uy = ps["momentum"]["y"].loadChunk<ParticleReal>();
+             momentum_unit_y = ps["momentum"]["y"].unitSI();
+        }
+        series->flush();  // shared_ptr data can be read now
+
+        ParticleReal weight = 1.0_prt;  // base standard: no info means "real" particles
+        if (q_tot != 0.0) {
+            weight = std::abs(q_tot) / ( std::abs(charge) * ParticleReal(npart) );
+            if (ps.contains("weighting")) {
+                Print() << "WARNING: Both '" << ps_name << ".q_tot' and '"
+                        << ps_name << ".injection_file' specify a total charge.\n'"
+                        << ps_name << ".q_tot' will take precedence.\n";
+            }
+        }
+        // ED-PIC extension?
+        else if (ps.contains("weighting")) {
+            // TODO: Add ASSERT_WITH_MESSAGE to test if weighting is a constant record
+            // TODO: Add ASSERT_WITH_MESSAGE for macroWeighted value in ED-PIC
+            ParticleReal w = ps["weighting"][openPMD::RecordComponent::SCALAR].loadChunk<ParticleReal>().get()[0];
+            double const w_unit = ps["weighting"][openPMD::RecordComponent::SCALAR].unitSI();
+            weight = w * w_unit;
+        }
+
+        for (auto i = decltype(npart){0}; i<npart; ++i){
+            ParticleReal const x = ptr_x.get()[i]*position_unit_x;
+            ParticleReal const z = ptr_z.get()[i]*position_unit_z+z_shift;
+#   ifndef WARPX_DIM_3D
+            ParticleReal const y = 0.0_prt;
+#   else
+            ParticleReal const y = ptr_y.get()[i]*position_unit_y;
+#   endif
+            if (plasma_injector->insideBounds(x, y, z)) {
+                ParticleReal const ux = ptr_ux.get()[i]*momentum_unit_x/PhysConst::m_e;
+                ParticleReal const uz = ptr_uz.get()[i]*momentum_unit_z/PhysConst::m_e;
+                ParticleReal uy = 0.0_prt;
+                if (ps["momentum"].contains("y")) {
+                    uy = ptr_uy.get()[i]*momentum_unit_y/PhysConst::m_e;
+                }
+                CheckAndAddParticle(x, y, z, { ux, uy, uz}, weight,
+                                    particle_x,  particle_y,  particle_z,
+                                    particle_ux, particle_uy, particle_uz,
+                                    particle_w);
+            }
+        }
+        auto const np = particle_z.size();
+        if (np < npart) {
+            Print() << "WARNING: Simulation box doesn't cover all particles\n";
+        }
+    } // IO Processor
+    auto const np = particle_z.size();
+    AddNParticles(0, np,
+                  particle_x.dataPtr(),  particle_y.dataPtr(),  particle_z.dataPtr(),
+                  particle_ux.dataPtr(), particle_uy.dataPtr(), particle_uz.dataPtr(),
+                  1, particle_w.dataPtr(),1);
+#endif // WARPX_USE_OPENPMD
+    return;
+}
+
+void
+PhysicalParticleContainer::CheckAndAddParticle (
+    Real x, Real y, Real z,
+    std::array<Real, 3> u,
+    Real weight,
+    Gpu::HostVector<ParticleReal>& particle_x,
+    Gpu::HostVector<ParticleReal>& particle_y,
+    Gpu::HostVector<ParticleReal>& particle_z,
+    Gpu::HostVector<ParticleReal>& particle_ux,
+    Gpu::HostVector<ParticleReal>& particle_uy,
+    Gpu::HostVector<ParticleReal>& particle_uz,
+    Gpu::HostVector<ParticleReal>& particle_w)
 {
     if (WarpX::gamma_boost > 1.) {
         MapParticletoBoostedFrame(x, y, z, u);
@@ -348,11 +446,20 @@ PhysicalParticleContainer::AddParticles (int lev)
                         plasma_injector->x_rms,
                         plasma_injector->y_rms,
                         plasma_injector->z_rms,
+                        plasma_injector->x_cut,
+                        plasma_injector->y_cut,
+                        plasma_injector->z_cut,
                         plasma_injector->q_tot,
                         plasma_injector->npart,
                         plasma_injector->do_symmetrize);
 
 
+        return;
+    }
+
+    if (plasma_injector->external_file) {
+        AddPlasmaFromFile(plasma_injector->q_tot,
+                          plasma_injector->z_shift);
         return;
     }
 
@@ -401,7 +508,7 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
 
     defineAllParticleTiles();
 
-    MultiFab* cost = WarpX::getCosts(lev);
+    amrex::LayoutData<amrex::Real>* cost = WarpX::getCosts(lev);
 
     const int nlevs = numLevels();
     static bool refine_injection = false;
@@ -454,6 +561,10 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
 
     for (MFIter mfi = MakeMFIter(lev, info); mfi.isValid(); ++mfi)
     {
+        if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
+        {
+            amrex::Gpu::synchronize();
+        }
         Real wt = amrex::second();
 
         const Box& tile_box = mfi.tilebox();
@@ -707,7 +818,14 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
                 // If the particle is not within the species's
                 // xmin, xmax, ymin, ymax, zmin, zmax, go to
                 // the next generated particle.
-                if (!inj_pos->insideBounds(xb, yb, z)) {
+
+                // include ballistic correction for plasma species with bulk motion
+                const XDim3 u_bulk = inj_mom->getBulkMomentum(x, y, z);
+                const Real gamma_bulk = std::sqrt(1.+(u_bulk.x*u_bulk.x+u_bulk.y*u_bulk.y+u_bulk.z*u_bulk.z));
+                const Real betaz_bulk = u_bulk.z/gamma_bulk;
+                const Real z0 = z - PhysConst::c*t*betaz_bulk;
+
+                if (!inj_pos->insideBounds(xb, yb, z0)) {
                     p.id() = -1;
                     return;
                 }
@@ -804,8 +922,9 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
                 }
 
 #endif
-                u = inj_mom->getMomentum(x, y, z);
-                dens = inj_rho->getDensity(x, y, z);
+
+                u = inj_mom->getMomentum(x, y, z0);
+                dens = inj_rho->getDensity(x, y, z0);
                 // Remove particle if density below threshold
                 if ( dens < density_min ){
                     p.id() = -1;
@@ -825,13 +944,15 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
                 //
                 // In order for this equation to be solvable, betaz_lab
                 // is explicitly assumed to have no dependency on z0_lab
-                u = inj_mom->getMomentum(x, y, 0.); // No z0_lab dependency
+                //
+                // Note that we use the bulk momentum to perform the ballastic correction
+                const XDim3 u_bulk = inj_mom->getBulkMomentum(x, y, 0.); // No z0_lab dependency
                 // At this point u is the lab-frame momentum
                 // => Apply the above formula for z0_lab
-                Real gamma_lab = std::sqrt( 1.+(u.x*u.x+u.y*u.y+u.z*u.z) );
-                Real betaz_lab = u.z/(gamma_lab);
-                Real z0_lab = gamma_boost * ( z*(1-beta_boost*betaz_lab)
-                                              - PhysConst::c*t*(betaz_lab-beta_boost) );
+                const Real gamma_lab_bulk = std::sqrt(1.+(u_bulk.x*u_bulk.x+u_bulk.y*u_bulk.y+u_bulk.z*u_bulk.z));
+                const Real betaz_lab_bulk = u_bulk.z/(gamma_lab_bulk);
+                const Real z0_lab = gamma_boost * ( z*(1-beta_boost*betaz_lab_bulk)
+                                              - PhysConst::c*t*(betaz_lab_bulk-beta_boost) );
                 // If the particle is not within the lab-frame zmin, zmax, etc.
                 // go to the next generated particle.
                 if (!inj_pos->insideBounds(xb, yb, z0_lab)) {
@@ -847,6 +968,12 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
                 }
                 // Cut density if above threshold
                 dens = amrex::min(dens, density_max);
+
+                // get the full momentum, including thermal motion
+                u = inj_mom->getMomentum(x, y, 0.);
+                const Real gamma_lab = std::sqrt( 1.+(u.x*u.x+u.y*u.y+u.z*u.z) );
+                const Real betaz_lab = u.z/(gamma_lab);
+
                 // At this point u and dens are the lab-frame quantities
                 // => Perform Lorentz transform
                 dens = gamma_boost * dens * ( 1.0 - beta_boost*betaz_lab );
@@ -901,170 +1028,167 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
 #endif
         });
 
-        if (cost) {
-            wt = (amrex::second() - wt) / tile_box.d_numPts();
-            Array4<Real> const& costarr = cost->array(mfi);
-            amrex::ParallelFor(tile_box,
-            [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-            {
-                costarr(i,j,k) += wt;
-            });
+        if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
+        {
+            amrex::Gpu::synchronize();
+            wt = amrex::second() - wt;
+            amrex::HostDevice::Atomic::Add( &(*cost)[mfi.index()], wt);
         }
     }
 
     // The function that calls this is responsible for redistributing particles.
 }
 
-void
-PhysicalParticleContainer::AssignExternalFieldOnParticles(WarpXParIter& pti,
-                           RealVector& Exp, RealVector& Eyp, RealVector& Ezp,
-                           RealVector& Bxp, RealVector& Byp, RealVector& Bzp, int lev)
-{
-   const long np = pti.numParticles();
-    /// get WarpX class object
-    auto & warpx = WarpX::GetInstance();
-    /// get MultiParticleContainer class object
-    auto & mypc = warpx.GetPartContainer();
-   if (mypc.m_E_ext_particle_s=="constant" ||
-       mypc.m_E_ext_particle_s=="default") {
-       Exp.assign(np,mypc.m_E_external_particle[0]);
-       Eyp.assign(np,mypc.m_E_external_particle[1]);
-       Ezp.assign(np,mypc.m_E_external_particle[2]);
-   }
-   if (mypc.m_B_ext_particle_s=="constant" ||
-       mypc.m_B_ext_particle_s=="default") {
-       Bxp.assign(np,mypc.m_B_external_particle[0]);
-       Byp.assign(np,mypc.m_B_external_particle[1]);
-       Bzp.assign(np,mypc.m_B_external_particle[2]);
-   }
-   if (mypc.m_E_ext_particle_s=="parse_e_ext_particle_function") {
-      const auto GetPosition = GetParticlePosition(pti);
-      Real* const AMREX_RESTRICT Exp_data = Exp.dataPtr();
-      Real* const AMREX_RESTRICT Eyp_data = Eyp.dataPtr();
-      Real* const AMREX_RESTRICT Ezp_data = Ezp.dataPtr();
-      ParserWrapper<4> *xfield_partparser = mypc.m_Ex_particle_parser.get();
-      ParserWrapper<4> *yfield_partparser = mypc.m_Ey_particle_parser.get();
-      ParserWrapper<4> *zfield_partparser = mypc.m_Ez_particle_parser.get();
-      Real time = warpx.gett_new(lev);
-      amrex::ParallelFor(pti.numParticles(),
-                         [=] AMREX_GPU_DEVICE (long i) {
-                             ParticleReal x, y, z;
-                             GetPosition(i, x, y, z);
-                             Exp_data[i] = (*xfield_partparser)(x, y, z, time);
-                             Eyp_data[i] = (*yfield_partparser)(x, y, z, time);
-                             Ezp_data[i] = (*zfield_partparser)(x, y, z, time);
-                         });
-   }
-   if (mypc.m_B_ext_particle_s=="parse_b_ext_particle_function") {
-      const auto GetPosition = GetParticlePosition(pti);
-      Real* const AMREX_RESTRICT Bxp_data = Bxp.dataPtr();
-      Real* const AMREX_RESTRICT Byp_data = Byp.dataPtr();
-      Real* const AMREX_RESTRICT Bzp_data = Bzp.dataPtr();
-      ParserWrapper<4> *xfield_partparser = mypc.m_Bx_particle_parser.get();
-      ParserWrapper<4> *yfield_partparser = mypc.m_By_particle_parser.get();
-      ParserWrapper<4> *zfield_partparser = mypc.m_Bz_particle_parser.get();
-      Real time = warpx.gett_new(lev);
-      amrex::ParallelFor(pti.numParticles(),
-            [=] AMREX_GPU_DEVICE (long i) {
-                             ParticleReal x, y, z;
-                             GetPosition(i, x, y, z);
-                             Bxp_data[i] = (*xfield_partparser)(x, y, z, time);
-                             Byp_data[i] = (*yfield_partparser)(x, y, z, time);
-                             Bzp_data[i] = (*zfield_partparser)(x, y, z, time);
-                         });
-   }
-
-#ifdef PULSAR
-   if (PulsarParm::EB_external == 1) {
-      const auto GetPosition = GetParticlePosition(pti);
-      Real* const AMREX_RESTRICT Exp_data = Exp.dataPtr();
-      Real* const AMREX_RESTRICT Eyp_data = Eyp.dataPtr();
-      Real* const AMREX_RESTRICT Ezp_data = Ezp.dataPtr();
-      Real* const AMREX_RESTRICT Bxp_data = Bxp.dataPtr();
-      Real* const AMREX_RESTRICT Byp_data = Byp.dataPtr();
-      Real* const AMREX_RESTRICT Bzp_data = Bzp.dataPtr();
-      Real time = warpx.gett_new(lev);
-      amrex::ParallelFor(pti.numParticles(),
-            [=] AMREX_GPU_DEVICE (long i) {
-                ParticleReal x, y, z;
-                GetPosition(i, x, y, z);
-                PulsarParm::PulsarEBField(x, y, z,
-                              Exp_data[i],Eyp_data[i],Ezp_data[i],
-                              Bxp_data[i],Byp_data[i],Bzp_data[i],time);
-      });
-   }
-#endif
-
-}
-
-
-
-void
-PhysicalParticleContainer::FieldGather (int lev,
-                                        const amrex::MultiFab& Ex,
-                                        const amrex::MultiFab& Ey,
-                                        const amrex::MultiFab& Ez,
-                                        const amrex::MultiFab& Bx,
-                                        const amrex::MultiFab& By,
-                                        const amrex::MultiFab& Bz)
-{
-    const std::array<Real,3>& dx = WarpX::CellSize(lev);
-
-    BL_ASSERT(OnSameGrids(lev,Ex));
-
-    MultiFab* cost = WarpX::getCosts(lev);
-
-#ifdef _OPENMP
-#pragma omp parallel
-#endif
-    {
-        for (WarpXParIter pti(*this, lev); pti.isValid(); ++pti)
-        {
-            Real wt = amrex::second();
-
-            const Box& box = pti.validbox();
-
-            auto& attribs = pti.GetAttribs();
-
-            auto& Exp = attribs[PIdx::Ex];
-            auto& Eyp = attribs[PIdx::Ey];
-            auto& Ezp = attribs[PIdx::Ez];
-            auto& Bxp = attribs[PIdx::Bx];
-            auto& Byp = attribs[PIdx::By];
-            auto& Bzp = attribs[PIdx::Bz];
-
-            const long np = pti.numParticles();
-
-            // Data on the grid
-            const FArrayBox& exfab = Ex[pti];
-            const FArrayBox& eyfab = Ey[pti];
-            const FArrayBox& ezfab = Ez[pti];
-            const FArrayBox& bxfab = Bx[pti];
-            const FArrayBox& byfab = By[pti];
-            const FArrayBox& bzfab = Bz[pti];
-
-            //
-            // Field Gather
-            //
-            int e_is_nodal = Ex.is_nodal() and Ey.is_nodal() and Ez.is_nodal();
-            FieldGather(pti, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
-                        &exfab, &eyfab, &ezfab, &bxfab, &byfab, &bzfab,
-                        Ex.nGrow(), e_is_nodal,
-                        0, np, lev, lev);
-
-            if (cost) {
-                const Box& tbx = pti.tilebox();
-                wt = (amrex::second() - wt) / tbx.d_numPts();
-                Array4<Real> const& costarr = cost->array(pti);
-                amrex::ParallelFor(tbx,
-                                   [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-                                   {
-                                       costarr(i,j,k) += wt;
-                                   });
-            }
-        }
-    }
-}
+//void
+//PhysicalParticleContainer::AssignExternalFieldOnParticles(WarpXParIter& pti,
+//                           RealVector& Exp, RealVector& Eyp, RealVector& Ezp,
+//                           RealVector& Bxp, RealVector& Byp, RealVector& Bzp, int lev)
+//{
+//   const long np = pti.numParticles();
+//    /// get WarpX class object
+//    auto & warpx = WarpX::GetInstance();
+//    /// get MultiParticleContainer class object
+//    auto & mypc = warpx.GetPartContainer();
+//   if (mypc.m_E_ext_particle_s=="constant" ||
+//       mypc.m_E_ext_particle_s=="default") {
+//       Exp.assign(np,mypc.m_E_external_particle[0]);
+//       Eyp.assign(np,mypc.m_E_external_particle[1]);
+//       Ezp.assign(np,mypc.m_E_external_particle[2]);
+//   }
+//   if (mypc.m_B_ext_particle_s=="constant" ||
+//       mypc.m_B_ext_particle_s=="default") {
+//       Bxp.assign(np,mypc.m_B_external_particle[0]);
+//       Byp.assign(np,mypc.m_B_external_particle[1]);
+//       Bzp.assign(np,mypc.m_B_external_particle[2]);
+//   }
+//   if (mypc.m_E_ext_particle_s=="parse_e_ext_particle_function") {
+//      const auto GetPosition = GetParticlePosition(pti);
+//      Real* const AMREX_RESTRICT Exp_data = Exp.dataPtr();
+//      Real* const AMREX_RESTRICT Eyp_data = Eyp.dataPtr();
+//      Real* const AMREX_RESTRICT Ezp_data = Ezp.dataPtr();
+//      ParserWrapper<4> *xfield_partparser = mypc.m_Ex_particle_parser.get();
+//      ParserWrapper<4> *yfield_partparser = mypc.m_Ey_particle_parser.get();
+//      ParserWrapper<4> *zfield_partparser = mypc.m_Ez_particle_parser.get();
+//      Real time = warpx.gett_new(lev);
+//      amrex::ParallelFor(pti.numParticles(),
+//                         [=] AMREX_GPU_DEVICE (long i) {
+//                             ParticleReal x, y, z;
+//                             GetPosition(i, x, y, z);
+//                             Exp_data[i] = (*xfield_partparser)(x, y, z, time);
+//                             Eyp_data[i] = (*yfield_partparser)(x, y, z, time);
+//                             Ezp_data[i] = (*zfield_partparser)(x, y, z, time);
+//                         });
+//   }
+//   if (mypc.m_B_ext_particle_s=="parse_b_ext_particle_function") {
+//      const auto GetPosition = GetParticlePosition(pti);
+//      Real* const AMREX_RESTRICT Bxp_data = Bxp.dataPtr();
+//      Real* const AMREX_RESTRICT Byp_data = Byp.dataPtr();
+//      Real* const AMREX_RESTRICT Bzp_data = Bzp.dataPtr();
+//      ParserWrapper<4> *xfield_partparser = mypc.m_Bx_particle_parser.get();
+//      ParserWrapper<4> *yfield_partparser = mypc.m_By_particle_parser.get();
+//      ParserWrapper<4> *zfield_partparser = mypc.m_Bz_particle_parser.get();
+//      Real time = warpx.gett_new(lev);
+//      amrex::ParallelFor(pti.numParticles(),
+//            [=] AMREX_GPU_DEVICE (long i) {
+//                             ParticleReal x, y, z;
+//                             GetPosition(i, x, y, z);
+//                             Bxp_data[i] = (*xfield_partparser)(x, y, z, time);
+//                             Byp_data[i] = (*yfield_partparser)(x, y, z, time);
+//                             Bzp_data[i] = (*zfield_partparser)(x, y, z, time);
+//                         });
+//   }
+//
+//#ifdef PULSAR
+//   if (PulsarParm::EB_external == 1) {
+//      const auto GetPosition = GetParticlePosition(pti);
+//      Real* const AMREX_RESTRICT Exp_data = Exp.dataPtr();
+//      Real* const AMREX_RESTRICT Eyp_data = Eyp.dataPtr();
+//      Real* const AMREX_RESTRICT Ezp_data = Ezp.dataPtr();
+//      Real* const AMREX_RESTRICT Bxp_data = Bxp.dataPtr();
+//      Real* const AMREX_RESTRICT Byp_data = Byp.dataPtr();
+//      Real* const AMREX_RESTRICT Bzp_data = Bzp.dataPtr();
+//      Real time = warpx.gett_new(lev);
+//      amrex::ParallelFor(pti.numParticles(),
+//            [=] AMREX_GPU_DEVICE (long i) {
+//                ParticleReal x, y, z;
+//                GetPosition(i, x, y, z);
+//                PulsarParm::PulsarEBField(x, y, z,
+//                              Exp_data[i],Eyp_data[i],Ezp_data[i],
+//                              Bxp_data[i],Byp_data[i],Bzp_data[i],time);
+//      });
+//   }
+//#endif
+//
+//}
+//
+//
+//
+//void
+//PhysicalParticleContainer::FieldGather (int lev,
+//                                        const amrex::MultiFab& Ex,
+//                                        const amrex::MultiFab& Ey,
+//                                        const amrex::MultiFab& Ez,
+//                                        const amrex::MultiFab& Bx,
+//                                        const amrex::MultiFab& By,
+//                                        const amrex::MultiFab& Bz)
+//{
+//    const std::array<Real,3>& dx = WarpX::CellSize(lev);
+//
+//    BL_ASSERT(OnSameGrids(lev,Ex));
+//
+//    MultiFab* cost = WarpX::getCosts(lev);
+//
+//#ifdef _OPENMP
+//#pragma omp parallel
+//#endif
+//    {
+//        for (WarpXParIter pti(*this, lev); pti.isValid(); ++pti)
+//        {
+//            Real wt = amrex::second();
+//
+//            const Box& box = pti.validbox();
+//
+//            auto& attribs = pti.GetAttribs();
+//
+//            auto& Exp = attribs[PIdx::Ex];
+//            auto& Eyp = attribs[PIdx::Ey];
+//            auto& Ezp = attribs[PIdx::Ez];
+//            auto& Bxp = attribs[PIdx::Bx];
+//            auto& Byp = attribs[PIdx::By];
+//            auto& Bzp = attribs[PIdx::Bz];
+//
+//            const long np = pti.numParticles();
+//
+//            // Data on the grid
+//            const FArrayBox& exfab = Ex[pti];
+//            const FArrayBox& eyfab = Ey[pti];
+//            const FArrayBox& ezfab = Ez[pti];
+//            const FArrayBox& bxfab = Bx[pti];
+//            const FArrayBox& byfab = By[pti];
+//            const FArrayBox& bzfab = Bz[pti];
+//
+//            //
+//            // Field Gather
+//            //
+//            int e_is_nodal = Ex.is_nodal() and Ey.is_nodal() and Ez.is_nodal();
+//            FieldGather(pti, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
+//                        &exfab, &eyfab, &ezfab, &bxfab, &byfab, &bzfab,
+//                        Ex.nGrow(), e_is_nodal,
+//                        0, np, lev, lev);
+//
+//            if (cost) {
+//                const Box& tbx = pti.tilebox();
+//                wt = (amrex::second() - wt) / tbx.d_numPts();
+//                Array4<Real> const& costarr = cost->array(pti);
+//                amrex::ParallelFor(tbx,
+//                                   [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+//                                   {
+//                                       costarr(i,j,k) += wt;
+//                                   });
+//            }
+//        }
+//    }
+//}
 
 void
 PhysicalParticleContainer::Evolve (int lev,
@@ -1078,21 +1202,11 @@ PhysicalParticleContainer::Evolve (int lev,
                                    Real /*t*/, Real dt, DtType a_dt_type)
 {
     WARPX_PROFILE("PPC::Evolve()");
-    WARPX_PROFILE_VAR_NS("PPC::Evolve::Copy", blp_copy);
-    WARPX_PROFILE_VAR_NS("PPC::FieldGather", blp_fg);
-    WARPX_PROFILE_VAR_NS("PPC::EvolveOpticalDepth", blp_ppc_qed_ev);
-    WARPX_PROFILE_VAR_NS("PPC::ParticlePush", blp_ppc_pp);
-
-    const std::array<Real,3>& dx = WarpX::CellSize(lev);
-    const std::array<Real,3>& cdx = WarpX::CellSize(std::max(lev-1,0));
-
-    // Get instances of NCI Godfrey filters
-    const auto& nci_godfrey_filter_exeybz = WarpX::GetInstance().nci_godfrey_filter_exeybz;
-    const auto& nci_godfrey_filter_bxbyez = WarpX::GetInstance().nci_godfrey_filter_bxbyez;
+    WARPX_PROFILE_VAR_NS("PPC::GatherAndPush", blp_fg);
 
     BL_ASSERT(OnSameGrids(lev,jx));
 
-    MultiFab* cost = WarpX::getCosts(lev);
+    amrex::LayoutData<amrex::Real>* cost = WarpX::getCosts(lev);
 
     const iMultiFab* current_masks = WarpX::CurrentBufferMasks(lev);
     const iMultiFab* gather_masks = WarpX::GatherBufferMasks(lev);
@@ -1127,6 +1241,10 @@ PhysicalParticleContainer::Evolve (int lev,
 
         for (WarpXParIter pti(*this, lev); pti.isValid(); ++pti)
         {
+            if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
+            {
+                amrex::Gpu::synchronize();
+            }
             Real wt = amrex::second();
 
             const Box& box = pti.validbox();
@@ -1137,12 +1255,6 @@ PhysicalParticleContainer::Evolve (int lev,
             auto& uxp = attribs[PIdx::ux];
             auto& uyp = attribs[PIdx::uy];
             auto& uzp = attribs[PIdx::uz];
-            auto& Exp = attribs[PIdx::Ex];
-            auto& Eyp = attribs[PIdx::Ey];
-            auto& Ezp = attribs[PIdx::Ez];
-            auto& Bxp = attribs[PIdx::Bx];
-            auto& Byp = attribs[PIdx::By];
-            auto& Bzp = attribs[PIdx::Bz];
 
             const long np = pti.numParticles();
 
@@ -1211,13 +1323,13 @@ PhysicalParticleContainer::Evolve (int lev,
                 int e_is_nodal = Ex.is_nodal() and Ey.is_nodal() and Ez.is_nodal();
 
                 //
-                // Field Gather of Aux Data (i.e., the full solution)
+                // Gather and push for particles not in the buffer
                 //
                 WARPX_PROFILE_VAR_START(blp_fg);
-                FieldGather(pti, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
-                            exfab, eyfab, ezfab, bxfab, byfab, bzfab,
-                            Ex.nGrow(), e_is_nodal,
-                            0, np_gather, lev, lev);
+                PushPX(pti, exfab, eyfab, ezfab,
+                       bxfab, byfab, bzfab,
+                       Ex.nGrow(), e_is_nodal,
+                       0, np_gather, lev, lev, dt, ScaleFields(false), a_dt_type);
 
                 if (np_gather < np)
                 {
@@ -1246,33 +1358,16 @@ PhysicalParticleContainer::Evolve (int lev,
                                        cexfab, ceyfab, cezfab, cbxfab, cbyfab, cbzfab);
                     }
 
-                    // Field gather for particles in gather buffers
+                    // Field gather and push for particles in gather buffers
                     e_is_nodal = cEx->is_nodal() and cEy->is_nodal() and cEz->is_nodal();
-                    FieldGather(pti, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
-                                cexfab, ceyfab, cezfab,
-                                cbxfab, cbyfab, cbzfab,
-                                cEx->nGrow(), e_is_nodal,
-                                nfine_gather, np-nfine_gather,
-                                lev, lev-1);
+                    PushPX(pti, cexfab, ceyfab, cezfab,
+                           cbxfab, cbyfab, cbzfab,
+                           cEx->nGrow(), e_is_nodal,
+                           nfine_gather, np-nfine_gather,
+                           lev, lev-1, dt, ScaleFields(false), a_dt_type);
                 }
 
                 WARPX_PROFILE_VAR_STOP(blp_fg);
-
-#ifdef WARPX_QED
-                //
-                //Evolve Optical Depth
-                //
-                WARPX_PROFILE_VAR_START(blp_ppc_qed_ev);
-                EvolveOpticalDepth(pti, dt);
-                WARPX_PROFILE_VAR_STOP(blp_ppc_qed_ev);
-#endif
-
-                //
-                // Particle Push
-                //
-                WARPX_PROFILE_VAR_START(blp_ppc_pp);
-                PushPX(pti, dt, a_dt_type);
-                WARPX_PROFILE_VAR_STOP(blp_ppc_pp);
 
                 //
                 // Current Deposition (only needed for electromagnetic solver)
@@ -1316,15 +1411,11 @@ PhysicalParticleContainer::Evolve (int lev,
                 }
             }
 
-            if (cost) {
-                const Box& tbx = pti.tilebox();
-                wt = (amrex::second() - wt) / tbx.d_numPts();
-                Array4<Real> const& costarr = cost->array(pti);
-                amrex::ParallelFor(tbx,
-                                   [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-                                   {
-                                       costarr(i,j,k) += wt;
-                                   });
+            if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
+            {
+                amrex::Gpu::synchronize();
+                wt = amrex::second() - wt;
+                amrex::HostDevice::Atomic::Add( &(*cost)[pti.index()], wt);
             }
         }
     }
@@ -1412,7 +1503,7 @@ PhysicalParticleContainer::applyNCIFilter (
 // Loop over all particles in the particle container and
 // split particles tagged with p.id()=DoSplitParticleID
 void
-PhysicalParticleContainer::SplitParticles(int lev)
+PhysicalParticleContainer::SplitParticles (int lev)
 {
     auto& mypc = WarpX::GetInstance().GetPartContainer();
     auto& pctmp_split = mypc.GetPCtmp();
@@ -1578,191 +1669,6 @@ PhysicalParticleContainer::SplitParticles(int lev)
 }
 
 void
-PhysicalParticleContainer::PushPX (WarpXParIter& pti, Real dt, DtType a_dt_type)
-{
-
-    // This wraps the momentum and position advance so that inheritors can modify the call.
-    auto& attribs = pti.GetAttribs();
-    // Extract pointers to the different particle quantities
-
-    const auto GetPosition = GetParticlePosition(pti);
-          auto SetPosition = SetParticlePosition(pti);
-
-    ParticleReal* const AMREX_RESTRICT ux = attribs[PIdx::ux].dataPtr();
-    ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
-    ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT Ex = attribs[PIdx::Ex].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT Ey = attribs[PIdx::Ey].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT Ez = attribs[PIdx::Ez].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT Bx = attribs[PIdx::Bx].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT By = attribs[PIdx::By].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT Bz = attribs[PIdx::Bz].dataPtr();
-
-    if (WarpX::do_back_transformed_diagnostics && do_back_transformed_diagnostics && (a_dt_type!=DtType::SecondHalf))
-    {
-        copy_attribs(pti);
-    }
-
-    int* AMREX_RESTRICT ion_lev = nullptr;
-    if (do_field_ionization){
-        ion_lev = pti.GetiAttribs(particle_icomps["ionization_level"]).dataPtr();
-    }
-
-    // Loop over the particles and update their momentum
-    const Real q = this->charge;
-    const Real m = this-> mass;
-
-#ifdef WARPX_QED
-    if(do_classical_radiation_reaction){
-        if(m_do_qed_quantum_sync){
-            const auto t_chi_max = m_shr_p_qs_engine->get_ref_ctrl().chi_part_min;
-            amrex::ParallelFor(
-                pti.numParticles(),
-                [=] AMREX_GPU_DEVICE (long i) {
-                    auto chi = QedUtils::chi_lepton(m*ux[i], m*uy[i], m*uz[i],
-                         Ex[i], Ey[i], Ez[i],
-                         Bx[i], By[i], Bz[i]);
-                    if(chi < t_chi_max){
-                        UpdateMomentumBorisWithRadiationReaction( ux[i], uy[i], uz[i],
-                                           Ex[i], Ey[i], Ez[i], Bx[i],
-                                           By[i], Bz[i], q, m, dt);
-                    }
-                    else{
-                        UpdateMomentumBoris( ux[i], uy[i], uz[i],
-                                           Ex[i], Ey[i], Ez[i], Bx[i],
-                                           By[i], Bz[i], q, m, dt);
-                    }
-                    ParticleReal x, y, z;
-                    GetPosition(i, x, y, z);
-                    UpdatePosition(x, y, z, ux[i], uy[i], uz[i], dt );
-                    SetPosition(i, x, y, z);
-                }
-            );
-        }else{
-            amrex::ParallelFor(
-                pti.numParticles(),
-                [=] AMREX_GPU_DEVICE (long i) {
-                    UpdateMomentumBorisWithRadiationReaction( ux[i], uy[i], uz[i],
-                                       Ex[i], Ey[i], Ez[i], Bx[i],
-                                       By[i], Bz[i], q, m, dt);
-                    ParticleReal x, y, z;
-                    GetPosition(i, x, y, z);
-                    UpdatePosition(x, y, z, ux[i], uy[i], uz[i], dt );
-                    SetPosition(i, x, y, z);
-                }
-            );
-        }
-#else
-    if(do_classical_radiation_reaction){
-        amrex::ParallelFor(
-            pti.numParticles(),
-            [=] AMREX_GPU_DEVICE (long i) {
-                Real qp = q;
-                if (ion_lev){ qp *= ion_lev[i]; }
-                UpdateMomentumBorisWithRadiationReaction( ux[i], uy[i], uz[i],
-                                   Ex[i], Ey[i], Ez[i], Bx[i],
-                                   By[i], Bz[i], qp, m, dt);
-                ParticleReal x, y, z;
-                GetPosition(i, x, y, z);
-                UpdatePosition(x, y, z, ux[i], uy[i], uz[i], dt );
-                SetPosition(i, x, y, z);
-            }
-        );
-#endif
-    } else if (WarpX::particle_pusher_algo == ParticlePusherAlgo::Boris){
-        amrex::ParallelFor(
-            pti.numParticles(),
-            [=] AMREX_GPU_DEVICE (long i) {
-                Real qp = q;
-                if (ion_lev){ qp *= ion_lev[i]; }
-                UpdateMomentumBoris( ux[i], uy[i], uz[i],
-                                     Ex[i], Ey[i], Ez[i], Bx[i],
-                                     By[i], Bz[i], qp, m, dt);
-                ParticleReal x, y, z;
-                GetPosition(i, x, y, z);
-                UpdatePosition(x, y, z, ux[i], uy[i], uz[i], dt );
-                SetPosition(i, x, y, z);
-            }
-        );
-    } else if (WarpX::particle_pusher_algo == ParticlePusherAlgo::Vay) {
-        amrex::ParallelFor(
-            pti.numParticles(),
-            [=] AMREX_GPU_DEVICE (long i) {
-                Real qp = q;
-                if (ion_lev){ qp *= ion_lev[i]; }
-                UpdateMomentumVay( ux[i], uy[i], uz[i],
-                                   Ex[i], Ey[i], Ez[i], Bx[i],
-                                   By[i], Bz[i], qp, m, dt);
-                ParticleReal x, y, z;
-                GetPosition(i, x, y, z);
-                UpdatePosition(x, y, z, ux[i], uy[i], uz[i], dt );
-                SetPosition(i, x, y, z);
-            }
-        );
-    } else if (WarpX::particle_pusher_algo == ParticlePusherAlgo::HigueraCary) {
-        amrex::ParallelFor(
-            pti.numParticles(),
-            [=] AMREX_GPU_DEVICE (long i) {
-                Real qp = q;
-                if (ion_lev){ qp *= ion_lev[i]; }
-                UpdateMomentumHigueraCary( ux[i], uy[i], uz[i],
-                                   Ex[i], Ey[i], Ez[i], Bx[i],
-                                   By[i], Bz[i], qp, m, dt);
-                ParticleReal x, y, z;
-                GetPosition(i, x, y, z);
-                UpdatePosition(x, y, z, ux[i], uy[i], uz[i], dt );
-                SetPosition(i, x, y, z);
-            }
-        );
-    } else {
-      amrex::Abort("Unknown particle pusher");
-    };
-}
-
-#ifdef WARPX_QED
-void PhysicalParticleContainer::EvolveOpticalDepth(
-    WarpXParIter& pti, amrex::Real dt)
-{
-    if(!has_quantum_sync())
-        return;
-
-    QuantumSynchrotronEvolveOpticalDepth evolve_opt =
-        m_shr_p_qs_engine->build_evolve_functor();
-
-    auto& attribs = pti.GetAttribs();
-    const ParticleReal* const AMREX_RESTRICT ux = attribs[PIdx::ux].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT Ex = attribs[PIdx::Ex].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT Ey = attribs[PIdx::Ey].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT Ez = attribs[PIdx::Ez].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT Bx = attribs[PIdx::Bx].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT By = attribs[PIdx::By].dataPtr();
-    const ParticleReal* const AMREX_RESTRICT Bz = attribs[PIdx::Bz].dataPtr();
-
-    ParticleReal* const AMREX_RESTRICT p_optical_depth_QSR =
-        pti.GetAttribs(particle_comps["optical_depth_QSR"]).dataPtr();
-
-    const ParticleReal m = this->mass;
-
-    amrex::ParallelFor(pti.numParticles(),
-            [=] AMREX_GPU_DEVICE (long i) {
-                const ParticleReal px = m * ux[i];
-                const ParticleReal py = m * uy[i];
-                const ParticleReal pz = m * uz[i];
-
-                bool has_event_happened = evolve_opt(
-                    px, py, pz,
-                    Ex[i], Ey[i], Ez[i],
-                    Bx[i], By[i], Bz[i],
-                    dt, p_optical_depth_QSR[i]);
-            }
-    );
-
-}
-#endif
-
-void
 PhysicalParticleContainer::PushP (int lev, Real dt,
                                   const MultiFab& Ex, const MultiFab& Ey, const MultiFab& Ez,
                                   const MultiFab& Bx, const MultiFab& By, const MultiFab& Bz)
@@ -1771,7 +1677,7 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
 
     if (do_not_push) return;
 
-    const std::array<Real,3>& dx = WarpX::CellSize(lev);
+    const std::array<amrex::Real,3>& dx = WarpX::CellSize(std::max(lev,0));
 
 #ifdef _OPENMP
 #pragma omp parallel
@@ -1779,16 +1685,8 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
     {
         for (WarpXParIter pti(*this, lev); pti.isValid(); ++pti)
         {
-            const Box& box = pti.validbox();
-
-            auto& attribs = pti.GetAttribs();
-
-            auto& Exp = attribs[PIdx::Ex];
-            auto& Eyp = attribs[PIdx::Ey];
-            auto& Ezp = attribs[PIdx::Ez];
-            auto& Bxp = attribs[PIdx::Bx];
-            auto& Byp = attribs[PIdx::By];
-            auto& Bzp = attribs[PIdx::Bz];
+            amrex::Box box = pti.tilebox();
+            box.grow(Ex.nGrow());
 
             const long np = pti.numParticles();
 
@@ -1800,125 +1698,110 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
             const FArrayBox& byfab = By[pti];
             const FArrayBox& bzfab = Bz[pti];
 
-            int e_is_nodal = Ex.is_nodal() and Ey.is_nodal() and Ez.is_nodal();
-            FieldGather(pti, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
-                        &exfab, &eyfab, &ezfab, &bxfab, &byfab, &bzfab,
-                        Ex.nGrow(), e_is_nodal,
-                        0, np, lev, lev);
+            const auto getPosition = GetParticlePosition(pti);
+                  auto setPosition = SetParticlePosition(pti);
 
-            // This wraps the momentum advance so that inheritors can modify the call.
-            // Extract pointers to the different particle quantities
+            const auto getExternalE = GetExternalEField(pti);
+            const auto getExternalB = GetExternalBField(pti);
+
+            const auto& xyzmin = WarpX::GetInstance().LowerCornerWithGalilean(box,v_galilean,lev);
+
+            const Dim3 lo = lbound(box);
+
+            int l_lower_order_in_v = WarpX::l_lower_order_in_v;
+            int nox = WarpX::nox;
+            int n_rz_azimuthal_modes = WarpX::n_rz_azimuthal_modes;
+
+            amrex::GpuArray<amrex::Real, 3> dx_arr = {dx[0], dx[1], dx[2]};
+            amrex::GpuArray<amrex::Real, 3> xyzmin_arr = {xyzmin[0], xyzmin[1], xyzmin[2]};
+
+            amrex::Array4<const amrex::Real> const& ex_arr = exfab.array();
+            amrex::Array4<const amrex::Real> const& ey_arr = eyfab.array();
+            amrex::Array4<const amrex::Real> const& ez_arr = ezfab.array();
+            amrex::Array4<const amrex::Real> const& bx_arr = bxfab.array();
+            amrex::Array4<const amrex::Real> const& by_arr = byfab.array();
+            amrex::Array4<const amrex::Real> const& bz_arr = bzfab.array();
+
+            amrex::IndexType const ex_type = exfab.box().ixType();
+            amrex::IndexType const ey_type = eyfab.box().ixType();
+            amrex::IndexType const ez_type = ezfab.box().ixType();
+            amrex::IndexType const bx_type = bxfab.box().ixType();
+            amrex::IndexType const by_type = byfab.box().ixType();
+            amrex::IndexType const bz_type = bzfab.box().ixType();
+
+            auto& attribs = pti.GetAttribs();
             ParticleReal* const AMREX_RESTRICT ux = attribs[PIdx::ux].dataPtr();
             ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
             ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
-            const ParticleReal* const AMREX_RESTRICT Expp = Exp.dataPtr();
-            const ParticleReal* const AMREX_RESTRICT Eypp = Eyp.dataPtr();
-            const ParticleReal* const AMREX_RESTRICT Ezpp = Ezp.dataPtr();
-            const ParticleReal* const AMREX_RESTRICT Bxpp = Bxp.dataPtr();
-            const ParticleReal* const AMREX_RESTRICT Bypp = Byp.dataPtr();
-            const ParticleReal* const AMREX_RESTRICT Bzpp = Bzp.dataPtr();
-
-            // Loop over the particles and update their momentum
-            const Real q = this->charge;
-            const Real m = this-> mass;
 
             int* AMREX_RESTRICT ion_lev = nullptr;
-            if (do_field_ionization){
+            if (do_field_ionization) {
                 ion_lev = pti.GetiAttribs(particle_icomps["ionization_level"]).dataPtr();
             }
 
-            //Assumes that all consistency checks have been done at initialization
-            if(do_classical_radiation_reaction){
-                 amrex::ParallelFor(pti.numParticles(),
-                    [=] AMREX_GPU_DEVICE (long i){
-                        Real qp = q;
-                        if (ion_lev){ qp *= ion_lev[i]; }
-                        UpdateMomentumBorisWithRadiationReaction(
-                            ux[i], uy[i], uz[i],
-                            Expp[i], Eypp[i], Ezpp[i],
-                            Bxpp[i], Bypp[i], Bzpp[i],
-                            qp, m, dt);
-                    }
-                );
-            } else if (WarpX::particle_pusher_algo == ParticlePusherAlgo::Boris){
-                amrex::ParallelFor(pti.numParticles(),
-                    [=] AMREX_GPU_DEVICE (long i) {
-                        Real qp = q;
-                        if (ion_lev){ qp *= ion_lev[i]; }
-                        UpdateMomentumBoris(
-                            ux[i], uy[i], uz[i],
-                            Expp[i], Eypp[i], Ezpp[i],
-                            Bxpp[i], Bypp[i], Bzpp[i],
-                            qp, m, dt);
-                    }
-                );
-            } else if (WarpX::particle_pusher_algo == ParticlePusherAlgo::Vay){
-                amrex::ParallelFor(pti.numParticles(),
-                    [=] AMREX_GPU_DEVICE (long i) {
-                        Real qp = q;
-                        if (ion_lev){ qp *= ion_lev[i]; }
-                        UpdateMomentumVay(
-                            ux[i], uy[i], uz[i],
-                            Expp[i], Eypp[i], Ezpp[i],
-                            Bxpp[i], Bypp[i], Bzpp[i],
-                            qp, m, dt);
-                    }
-                );
-            } else if (WarpX::particle_pusher_algo == ParticlePusherAlgo::HigueraCary){
-                amrex::ParallelFor(pti.numParticles(),
-                    [=] AMREX_GPU_DEVICE (long i) {
-                        UpdateMomentumHigueraCary( ux[i], uy[i], uz[i],
-                            Expp[i], Eypp[i], Ezpp[i],
-                            Bxpp[i], Bypp[i], Bzpp[i],
-                            q, m, dt);
-                    }
-                );
-            } else {
-              amrex::Abort("Unknown particle pusher");
-            }
+            // Loop over the particles and update their momentum
+            const amrex::Real q = this->charge;
+            const amrex::Real m = this-> mass;
 
+            const auto pusher_algo = WarpX::particle_pusher_algo;
+            const auto do_crr = do_classical_radiation_reaction;
+
+            amrex::ParallelFor( np, [=] AMREX_GPU_DEVICE (long ip)
+            {
+                amrex::ParticleReal xp, yp, zp;
+                getPosition(ip, xp, yp, zp);
+
+                amrex::ParticleReal Exp = 0._rt, Eyp = 0._rt, Ezp = 0._rt;
+                getExternalE(ip, Exp, Eyp, Ezp);
+
+                amrex::ParticleReal Bxp = 0._rt, Byp = 0._rt, Bzp = 0._rt;
+                getExternalB(ip, Bxp, Byp, Bzp);
+
+                // first gather E and B to the particle positions
+                doGatherShapeN(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
+                               ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr,
+                               ex_type, ey_type, ez_type, bx_type, by_type, bz_type,
+                               dx_arr, xyzmin_arr, lo, n_rz_azimuthal_modes,
+                               nox, l_lower_order_in_v);
+
+                if (do_crr) {
+                    amrex::Real qp = q;
+                    if (ion_lev) { qp *= ion_lev[ip]; }
+                    UpdateMomentumBorisWithRadiationReaction(ux[ip], uy[ip], uz[ip],
+                                                             Exp, Eyp, Ezp, Bxp,
+                                                             Byp, Bzp, qp, m, dt);
+                } else if (pusher_algo == ParticlePusherAlgo::Boris) {
+                    amrex::Real qp = q;
+                    if (ion_lev) { qp *= ion_lev[ip]; }
+                    UpdateMomentumBoris( ux[ip], uy[ip], uz[ip],
+                                         Exp, Eyp, Ezp, Bxp,
+                                         Byp, Bzp, qp, m, dt);
+                } else if (pusher_algo == ParticlePusherAlgo::Vay) {
+                    amrex::Real qp = q;
+                    if (ion_lev){ qp *= ion_lev[ip]; }
+                    UpdateMomentumVay( ux[ip], uy[ip], uz[ip],
+                                       Exp, Eyp, Ezp, Bxp,
+                                       Byp, Bzp, qp, m, dt);
+                } else if (pusher_algo == ParticlePusherAlgo::HigueraCary) {
+                    amrex::Real qp = q;
+                    if (ion_lev){ qp *= ion_lev[ip]; }
+                    UpdateMomentumHigueraCary( ux[ip], uy[ip], uz[ip],
+                                               Exp, Eyp, Ezp, Bxp,
+                                               Byp, Bzp, qp, m, dt);
+                } else {
+                    amrex::Abort("Unknown particle pusher");
+                }
+            });
         }
     }
 }
 
-void PhysicalParticleContainer::copy_attribs (WarpXParIter& pti)
-{
-    auto& attribs = pti.GetAttribs();
-    ParticleReal* AMREX_RESTRICT uxp = attribs[PIdx::ux].dataPtr();
-    ParticleReal* AMREX_RESTRICT uyp = attribs[PIdx::uy].dataPtr();
-    ParticleReal* AMREX_RESTRICT uzp = attribs[PIdx::uz].dataPtr();
-
-    const auto np = pti.numParticles();
-    const auto lev = pti.GetLevel();
-    const auto index = pti.GetPairIndex();
-    ParticleReal* AMREX_RESTRICT xpold  = tmp_particle_data[lev][index][TmpIdx::xold ].dataPtr();
-    ParticleReal* AMREX_RESTRICT ypold  = tmp_particle_data[lev][index][TmpIdx::yold ].dataPtr();
-    ParticleReal* AMREX_RESTRICT zpold  = tmp_particle_data[lev][index][TmpIdx::zold ].dataPtr();
-    ParticleReal* AMREX_RESTRICT uxpold = tmp_particle_data[lev][index][TmpIdx::uxold].dataPtr();
-    ParticleReal* AMREX_RESTRICT uypold = tmp_particle_data[lev][index][TmpIdx::uyold].dataPtr();
-    ParticleReal* AMREX_RESTRICT uzpold = tmp_particle_data[lev][index][TmpIdx::uzold].dataPtr();
-
-    const auto GetPosition = GetParticlePosition(pti);
-
-    ParallelFor( np,
-                 [=] AMREX_GPU_DEVICE (long i) {
-                     ParticleReal x, y, z;
-                     GetPosition(i, x, y, z);
-                     xpold[i]=x;
-                     ypold[i]=y;
-                     zpold[i]=z;
-
-                     uxpold[i]=uxp[i];
-                     uypold[i]=uyp[i];
-                     uzpold[i]=uzp[i];
-                 }
-        );
-}
-
-void PhysicalParticleContainer::GetParticleSlice(const int direction, const Real z_old,
-                                                 const Real z_new, const Real t_boost,
-                                                 const Real t_lab, const Real dt,
-                                                 DiagnosticParticles& diagnostic_particles)
+void
+PhysicalParticleContainer::GetParticleSlice (
+    const int direction, const Real z_old,
+    const Real z_new, const Real t_boost,
+    const Real t_lab, const Real dt,
+    DiagnosticParticles& diagnostic_particles)
 {
     WARPX_PROFILE("PhysicalParticleContainer::GetParticleSlice");
 
@@ -1964,6 +1847,14 @@ void PhysicalParticleContainer::GetParticleSlice(const int direction, const Real
 #pragma omp parallel
 #endif
         {
+            // Temporary arrays to store copy_flag and copy_index
+            // for particles that cross the z-slice
+            // These arrays are defined before the WarpXParIter to prevent them
+            // from going out of scope after each iteration, while the kernels
+            // may still need access to them.
+            // Note that the destructor for WarpXParIter is synchronized.
+            amrex::Gpu::ManagedDeviceVector<int> FlagForPartCopy;
+            amrex::Gpu::ManagedDeviceVector<int> IndexForPartCopy;
             for (WarpXParIter pti(*this, lev); pti.isValid(); ++pti)
             {
                 const Box& box = pti.validbox();
@@ -1998,10 +1889,8 @@ void PhysicalParticleContainer::GetParticleSlice(const int direction, const Real
                 Real uzfrm = -WarpX::gamma_boost*WarpX::beta_boost*PhysConst::c;
                 Real inv_c2 = 1.0/PhysConst::c/PhysConst::c;
 
-                // temporary arrays to store copy_flag and copy_index
-                // for particles that cross the z-slice
-                amrex::Gpu::ManagedDeviceVector<int> FlagForPartCopy(np);
-                amrex::Gpu::ManagedDeviceVector<int> IndexForPartCopy(np);
+                FlagForPartCopy.resize(np);
+                IndexForPartCopy.resize(np);
 
                 int* const AMREX_RESTRICT Flag = FlagForPartCopy.dataPtr();
                 int* const AMREX_RESTRICT IndexLocation = IndexForPartCopy.dataPtr();
@@ -2114,55 +2003,40 @@ void PhysicalParticleContainer::GetParticleSlice(const int direction, const Real
  * \param injection_box: domain where particles should be injected.
  */
 void
-PhysicalParticleContainer::ContinuousInjection(const RealBox& injection_box)
+PhysicalParticleContainer::ContinuousInjection (const RealBox& injection_box)
 {
     // Inject plasma on level 0. Paticles will be redistributed.
     const int lev=0;
     AddPlasma(lev, injection_box);
 }
 
-/* \brief Gather fields from FArrayBox exfab, eyfab, ezfab, bxfab, byfab,
- * bzfab into arrays of fields on particles Exp, Eyp, Ezp, Bxp, Byp, Bzp.
- * \param Exp-Bzp: fields on particles.
- * \param exfab-bzfab: FAB of electric and magnetic fields for particles in pti
- * \param ngE: number of guard cells for E
- * \param e_is_nodal: 0 if E is staggered, 1 if E is nodal
- * \param offset: index of first particle for which fields are gathered
- * \param np_to_gather: number of particles onto which fields are gathered
- * \param lev: level on which particles are located
- * \param gather_lev: level from which particles gather fields (lev-1) for
-          particles in buffers.
+/* \brief Perform the field gather and particle push operations in one fused kernel
+ *
  */
 void
-PhysicalParticleContainer::FieldGather (WarpXParIter& pti,
-                                        RealVector& Exp,
-                                        RealVector& Eyp,
-                                        RealVector& Ezp,
-                                        RealVector& Bxp,
-                                        RealVector& Byp,
-                                        RealVector& Bzp,
-                                        amrex::FArrayBox const * exfab,
-                                        amrex::FArrayBox const * eyfab,
-                                        amrex::FArrayBox const * ezfab,
-                                        amrex::FArrayBox const * bxfab,
-                                        amrex::FArrayBox const * byfab,
-                                        amrex::FArrayBox const * bzfab,
-                                        const int ngE, const int /*e_is_nodal*/,
-                                        const long offset,
-                                        const long np_to_gather,
-                                        int lev,
-                                        int gather_lev)
+PhysicalParticleContainer::PushPX (WarpXParIter& pti,
+                                   amrex::FArrayBox const * exfab,
+                                   amrex::FArrayBox const * eyfab,
+                                   amrex::FArrayBox const * ezfab,
+                                   amrex::FArrayBox const * bxfab,
+                                   amrex::FArrayBox const * byfab,
+                                   amrex::FArrayBox const * bzfab,
+                                   const int ngE, const int /*e_is_nodal*/,
+                                   const long offset,
+                                   const long np_to_push,
+                                   int lev, int gather_lev,
+                                   amrex::Real dt, ScaleFields scaleFields,
+                                   DtType a_dt_type)
 {
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE((gather_lev==(lev-1)) ||
                                      (gather_lev==(lev  )),
                                      "Gather buffers only work for lev-1");
     // If no particles, do not do anything
     // If do_not_gather = 1 by user, do not do anything
-    if (np_to_gather == 0 || do_not_gather) return;
-
-    // initializing the field value to the externally applied field before
-    // gathering fields from the grid to the particles.
-    AssignExternalFieldOnParticles(pti, Exp, Eyp, Ezp, Bxp, Byp, Bzp, lev);
+    if (np_to_push == 0 || do_not_gather) return;
+//    // initializing the field value to the externally applied field before
+//    // gathering fields from the grid to the particles.
+//    AssignExternalFieldOnParticles(pti, Exp, Eyp, Ezp, Bxp, Byp, Bzp, lev);
 
     // Get cell size on gather_lev
     const std::array<Real,3>& dx = WarpX::CellSize(std::max(gather_lev,0));
@@ -2180,7 +2054,11 @@ PhysicalParticleContainer::FieldGather (WarpXParIter& pti,
     // Add guard cells to the box.
     box.grow(ngE);
 
-    const auto GetPosition = GetParticlePosition(pti, offset);
+    const auto getPosition = GetParticlePosition(pti, offset);
+          auto setPosition = SetParticlePosition(pti, offset);
+
+    const auto getExternalE = GetExternalEField(pti, offset);
+    const auto getExternalB = GetExternalBField(pti, offset);
 
     // Lower corner of tile box physical domain (take into account Galilean shift)
     Real cur_time = WarpX::GetInstance().gett_new(lev);
@@ -2191,65 +2069,110 @@ PhysicalParticleContainer::FieldGather (WarpXParIter& pti,
 
     const Dim3 lo = lbound(box);
 
-    // Depending on l_lower_in_v and WarpX::nox, call
-    // different versions of template function doGatherShapeN
-    if (WarpX::l_lower_order_in_v){
-        if        (WarpX::nox == 1){
-            doGatherShapeN<1,1>(GetPosition,
-                                Exp.dataPtr() + offset, Eyp.dataPtr() + offset,
-                                Ezp.dataPtr() + offset, Bxp.dataPtr() + offset,
-                                Byp.dataPtr() + offset, Bzp.dataPtr() + offset,
-                                exfab, eyfab, ezfab, bxfab, byfab, bzfab,
-                                np_to_gather, dx,
-                                xyzmin, lo, WarpX::n_rz_azimuthal_modes);
-        } else if (WarpX::nox == 2){
-            doGatherShapeN<2,1>(GetPosition,
-                                Exp.dataPtr() + offset, Eyp.dataPtr() + offset,
-                                Ezp.dataPtr() + offset, Bxp.dataPtr() + offset,
-                                Byp.dataPtr() + offset, Bzp.dataPtr() + offset,
-                                exfab, eyfab, ezfab, bxfab, byfab, bzfab,
-                                np_to_gather, dx,
-                                xyzmin, lo, WarpX::n_rz_azimuthal_modes);
-        } else if (WarpX::nox == 3){
-            doGatherShapeN<3,1>(GetPosition,
-                                Exp.dataPtr() + offset, Eyp.dataPtr() + offset,
-                                Ezp.dataPtr() + offset, Bxp.dataPtr() + offset,
-                                Byp.dataPtr() + offset, Bzp.dataPtr() + offset,
-                                exfab, eyfab, ezfab, bxfab, byfab, bzfab,
-                                np_to_gather, dx,
-                                xyzmin, lo, WarpX::n_rz_azimuthal_modes);
-        }
-    } else {
-        if        (WarpX::nox == 1){
-            doGatherShapeN<1,0>(GetPosition,
-                                Exp.dataPtr() + offset, Eyp.dataPtr() + offset,
-                                Ezp.dataPtr() + offset, Bxp.dataPtr() + offset,
-                                Byp.dataPtr() + offset, Bzp.dataPtr() + offset,
-                                exfab, eyfab, ezfab, bxfab, byfab, bzfab,
-                                np_to_gather, dx,
-                                xyzmin, lo, WarpX::n_rz_azimuthal_modes);
-        } else if (WarpX::nox == 2){
-            doGatherShapeN<2,0>(GetPosition,
-                                Exp.dataPtr() + offset, Eyp.dataPtr() + offset,
-                                Ezp.dataPtr() + offset, Bxp.dataPtr() + offset,
-                                Byp.dataPtr() + offset, Bzp.dataPtr() + offset,
-                                exfab, eyfab, ezfab, bxfab, byfab, bzfab,
-                                np_to_gather, dx,
-                                xyzmin, lo, WarpX::n_rz_azimuthal_modes);
-        } else if (WarpX::nox == 3){
-            doGatherShapeN<3,0>(GetPosition,
-                                Exp.dataPtr() + offset, Eyp.dataPtr() + offset,
-                                Ezp.dataPtr() + offset, Bxp.dataPtr() + offset,
-                                Byp.dataPtr() + offset, Bzp.dataPtr() + offset,
-                                exfab, eyfab, ezfab, bxfab, byfab, bzfab,
-                                np_to_gather, dx,
-                                xyzmin, lo, WarpX::n_rz_azimuthal_modes);
-        }
+    int l_lower_order_in_v = WarpX::l_lower_order_in_v;
+    int nox = WarpX::nox;
+    int n_rz_azimuthal_modes = WarpX::n_rz_azimuthal_modes;
+
+    amrex::GpuArray<amrex::Real, 3> dx_arr = {dx[0], dx[1], dx[2]};
+    amrex::GpuArray<amrex::Real, 3> xyzmin_arr = {xyzmin[0], xyzmin[1], xyzmin[2]};
+
+    amrex::Array4<const amrex::Real> const& ex_arr = exfab->array();
+    amrex::Array4<const amrex::Real> const& ey_arr = eyfab->array();
+    amrex::Array4<const amrex::Real> const& ez_arr = ezfab->array();
+    amrex::Array4<const amrex::Real> const& bx_arr = bxfab->array();
+    amrex::Array4<const amrex::Real> const& by_arr = byfab->array();
+    amrex::Array4<const amrex::Real> const& bz_arr = bzfab->array();
+
+    amrex::IndexType const ex_type = exfab->box().ixType();
+    amrex::IndexType const ey_type = eyfab->box().ixType();
+    amrex::IndexType const ez_type = ezfab->box().ixType();
+    amrex::IndexType const bx_type = bxfab->box().ixType();
+    amrex::IndexType const by_type = byfab->box().ixType();
+    amrex::IndexType const bz_type = bzfab->box().ixType();
+
+    auto& attribs = pti.GetAttribs();
+    ParticleReal* const AMREX_RESTRICT ux = attribs[PIdx::ux].dataPtr();
+    ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
+    ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
+
+    auto copyAttribs = CopyParticleAttribs(pti, tmp_particle_data, offset);
+    int do_copy = (WarpX::do_back_transformed_diagnostics &&
+                          do_back_transformed_diagnostics &&
+                   (a_dt_type!=DtType::SecondHalf));
+
+    int* AMREX_RESTRICT ion_lev = nullptr;
+    if (do_field_ionization) {
+        ion_lev = pti.GetiAttribs(particle_icomps["ionization_level"]).dataPtr();
     }
+
+    // Loop over the particles and update their momentum
+    const amrex::Real q = this->charge;
+    const amrex::Real m = this-> mass;
+
+    const auto pusher_algo = WarpX::particle_pusher_algo;
+    const auto do_crr = do_classical_radiation_reaction;
+#ifdef WARPX_QED
+    const auto do_sync = m_do_qed_quantum_sync;
+    amrex::Real t_chi_max = 0.0;
+    if (do_sync) t_chi_max = m_shr_p_qs_engine->get_ref_ctrl().chi_part_min;
+
+    QuantumSynchrotronEvolveOpticalDepth evolve_opt;
+    amrex::ParticleReal* AMREX_RESTRICT p_optical_depth_QSR = nullptr;
+    const bool local_has_quantum_sync = has_quantum_sync();
+    if (local_has_quantum_sync) {
+        evolve_opt = m_shr_p_qs_engine->build_evolve_functor();
+        p_optical_depth_QSR = pti.GetAttribs(particle_comps["optical_depth_QSR"]).dataPtr();
+    }
+#endif
+
+    amrex::ParallelFor( np_to_push, [=] AMREX_GPU_DEVICE (long ip)
+    {
+        amrex::ParticleReal xp, yp, zp;
+        getPosition(ip, xp, yp, zp);
+
+        amrex::ParticleReal Exp = 0._rt, Eyp = 0._rt, Ezp = 0._rt;
+        getExternalE(ip, Exp, Eyp, Ezp);
+
+        amrex::ParticleReal Bxp = 0._rt, Byp = 0._rt, Bzp = 0._rt;
+        getExternalB(ip, Bxp, Byp, Bzp);
+
+        // first gather E and B to the particle positions
+        doGatherShapeN(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
+                       ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr,
+                       ex_type, ey_type, ez_type, bx_type, by_type, bz_type,
+                       dx_arr, xyzmin_arr, lo, n_rz_azimuthal_modes,
+                       nox, l_lower_order_in_v);
+
+        scaleFields(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp);
+
+#ifdef WARPX_WED
+    if (local_has_quantum_sync) {
+        const ParticleReal px = m * ux[ip];
+        const ParticleReal py = m * uy[ip];
+        const ParticleReal pz = m * uz[ip];
+
+        bool has_event_happened = evolve_opt(px, py, pz,
+                                             Exp, Eyp, Ezp,
+                                             Bxp, Byp, Bzp,
+                                             dt, p_optical_depth_QSR[ip]);
+    }
+#endif
+
+        doParticlePush(getPosition, setPosition, copyAttribs, ip,
+                       ux[ip+offset], uy[ip+offset], uz[ip+offset],
+                       Exp, Eyp, Ezp, Bxp, Byp, Bzp,
+                       ion_lev ? ion_lev[ip] : 0,
+                       m, q, pusher_algo, do_crr, do_copy,
+#ifdef WARPX_QED
+                       do_sync,
+                       t_chi_max,
+#endif
+                       dt);
+    });
 }
 
-
-void PhysicalParticleContainer::InitIonizationModule ()
+void
+PhysicalParticleContainer::InitIonizationModule ()
 {
     if (!do_field_ionization) return;
     ParmParse pp(species_name);
@@ -2298,49 +2221,67 @@ void PhysicalParticleContainer::InitIonizationModule ()
 }
 
 IonizationFilterFunc
-PhysicalParticleContainer::getIonizationFunc ()
+PhysicalParticleContainer::getIonizationFunc (const WarpXParIter& pti,
+                                              int lev,
+                                              int ngE,
+                                              const amrex::FArrayBox& Ex,
+                                              const amrex::FArrayBox& Ey,
+                                              const amrex::FArrayBox& Ez,
+                                              const amrex::FArrayBox& Bx,
+                                              const amrex::FArrayBox& By,
+                                              const amrex::FArrayBox& Bz)
 {
     WARPX_PROFILE("PPC::getIonizationFunc");
 
-    return IonizationFilterFunc{ionization_energies.dataPtr(),
+    return IonizationFilterFunc(pti, lev, ngE, Ex, Ey, Ez, Bx, By, Bz,
+                                v_galilean,
+                                ionization_energies.dataPtr(),
                                 adk_prefactor.dataPtr(),
                                 adk_exp_prefactor.dataPtr(),
                                 adk_power.dataPtr(),
                                 particle_icomps["ionization_level"],
-                                ion_atomic_number};
-}
-
-//This function return true if the PhysicalParticleContainer contains electrons
-//or positrons, false otherwise
-bool
-PhysicalParticleContainer::AmIALepton(){
-    return (this-> mass == PhysConst::m_e);
+                                ion_atomic_number);
 }
 
 #ifdef WARPX_QED
 
-bool PhysicalParticleContainer::has_quantum_sync()
+
+bool PhysicalParticleContainer::has_quantum_sync () const
 {
     return m_do_qed_quantum_sync;
 }
 
-bool PhysicalParticleContainer::has_breit_wheeler()
+bool PhysicalParticleContainer::has_breit_wheeler () const
 {
     return m_do_qed_breit_wheeler;
 }
 
 void
 PhysicalParticleContainer::
-set_breit_wheeler_engine_ptr(std::shared_ptr<BreitWheelerEngine> ptr)
+set_breit_wheeler_engine_ptr (std::shared_ptr<BreitWheelerEngine> ptr)
 {
     m_shr_p_bw_engine = ptr;
 }
 
 void
 PhysicalParticleContainer::
-set_quantum_sync_engine_ptr(std::shared_ptr<QuantumSynchrotronEngine> ptr)
+set_quantum_sync_engine_ptr (std::shared_ptr<QuantumSynchrotronEngine> ptr)
 {
     m_shr_p_qs_engine = ptr;
+}
+
+PhotonEmissionFilterFunc
+PhysicalParticleContainer::getPhotonEmissionFilterFunc ()
+{
+    WARPX_PROFILE("PPC::getPhotonEmissionFunc");
+    return PhotonEmissionFilterFunc{particle_runtime_comps["optical_depth_QSR"]};
+}
+
+PairGenerationFilterFunc
+PhysicalParticleContainer::getPairGenerationFilterFunc ()
+{
+    WARPX_PROFILE("PPC::getPairGenerationFunc");
+    return PairGenerationFilterFunc{particle_runtime_comps["optical_depth_BW"]};
 }
 
 #endif

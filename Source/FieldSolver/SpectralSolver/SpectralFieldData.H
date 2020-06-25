@@ -8,8 +8,10 @@
 #ifndef WARPX_SPECTRAL_FIELD_DATA_H_
 #define WARPX_SPECTRAL_FIELD_DATA_H_
 
-#include "WarpX_ComplexForFFT.H"
+#include "Utils/WarpX_Complex.H"
 #include "SpectralKSpace.H"
+#include "AnyFFT.H"
+
 #include <AMReX_MultiFab.H>
 
 #include <string>
@@ -38,20 +40,12 @@ struct SpectralPMLIndex {
 class SpectralFieldData
 {
 
-    // Define the FFTplans type, which holds one fft plan per box
-    // (plans are only initialized for the boxes that are owned by
-    // the local MPI rank)
-#ifdef AMREX_USE_GPU
-    using FFTplans = amrex::LayoutData<cufftHandle>;
-#else
-    using FFTplans = amrex::LayoutData<fftw_plan>;
-#endif
-
     public:
         SpectralFieldData( const amrex::BoxArray& realspace_ba,
                            const SpectralKSpace& k_space,
                            const amrex::DistributionMapping& dm,
-                           const int n_field_required );
+                           const int n_field_required,
+                           const bool periodic_single_box );
         SpectralFieldData() = default; // Default constructor
         SpectralFieldData& operator=(SpectralFieldData&& field_data) = default;
         ~SpectralFieldData();
@@ -67,7 +61,7 @@ class SpectralFieldData
         // right before/after the Fourier transform
         SpectralField tmpSpectralField; // contains Complexs
         amrex::MultiFab tmpRealField; // contains Reals
-        FFTplans forward_plan, backward_plan;
+        AnyFFT::FFTplans forward_plan, backward_plan;
         // Correcting "shift" factors when performing FFT from/to
         // a cell-centered grid in real space, instead of a nodal grid
         SpectralShiftFactor xshift_FFTfromCell, xshift_FFTtoCell,
@@ -85,6 +79,8 @@ class SpectralFieldData
         */
         std::string cufftErrorToString (const cufftResult& err);
 #endif
+
+        bool m_periodic_single_box;
 };
 
 #endif // WARPX_SPECTRAL_FIELD_DATA_H_
