@@ -29,9 +29,8 @@
 #   include "Particles/ElementaryProcess/QEDInternals/QuantumSyncEngineWrapper.H"
 #endif
 
-#include "CollisionType.H"
 #ifdef PULSAR
-    #include <PulsarParameters.H>
+    #include "Particles/PulsarParameters.H"
 #endif
 #include <AMReX_Particles.H>
 
