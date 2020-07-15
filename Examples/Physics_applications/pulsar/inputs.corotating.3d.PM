@@ -13,11 +13,11 @@
 #################################
 ####### GENERAL PARAMETERS ######
 #################################
-max_step = 100
-#amr.n_cell = 256 256 256
+max_step = 1000
 amr.n_cell = 128 128 128
-amr.max_grid_size = 64
-amr.blocking_factor = 64
+#amr.n_cell = 128 128 128
+amr.max_grid_size = 128
+amr.blocking_factor = 128
 amr.max_level = 0
 geometry.coord_sys   = 0                  # 0: Cartesian
 geometry.is_periodic = 0 0 0     # Is periodic?
@@ -31,30 +31,21 @@ algo.maxwell_fdtd_solver = yee
 warpx.verbose = 1
 warpx.do_dive_cleaning = 0
 warpx.use_filter = 1
-warpx.cfl = .5
+warpx.cfl = .2
 my_constants.pi    = 3.141592653589793
 my_constants.dens  = 5.544e6
 my_constants.xc  = 90000
 my_constants.yc  = 90000
 my_constants.zc  = 90000
-my_constants.r_star  = 12000
+my_constants.r_star  = 12032
 my_constants.omega = 6245.676
 my_constants.c = 299792458.
 my_constants.B_star = 8.0323e-6                  # magnetic field of NS (T)
-my_constants.dR = 1.4e3
-my_constants.to = 2e-4
+my_constants.dR = 1406
+my_constants.to = 2.e-4
 interpolation.nox = 3
 interpolation.noy = 3
 interpolation.noz = 3
-
-#warpx.E_ext_grid_init_style = "parse_E_ext_grid_function"
-#warpx.Ex_external_grid_function(x,y,z) = "((x-xc)*(x-xc)+(y-yc)*(y-yc) + (z-zc)*(z-zc))^0.5"
-#warpx.Ey_external_grid_function(x,y,z) = "((x-xc)*(x-xc)+(y-yc)*(y-yc) + (z-zc)*(z-zc))^0.5"
-#warpx.Ez_external_grid_function(x,y,z) = "((x-xc)*(x-xc)+(y-yc)*(y-yc) + (z-zc)*(z-zc))^0.5"
-
-
-
-
 
 #################################
 ############ PLASMA #############
@@ -81,14 +72,8 @@ plasma_e.momentum_distribution_type = parse_momentum_function
 ## Inject stationary pairs
 plasma_e.momentum_function_ux(x,y,z) = "0.0"
 plasma_e.momentum_function_uy(x,y,z) = "0.0"
-
 ## uz is always 0 for the injection methods above
 plasma_e.momentum_function_uz(x,y,z) = "0.0"
-
-#plasma_e.momentum_distribution_type = "constant"
-#plasma_e.ux = 0.0
-#plasma_e.uy = 0.0
-#plasma_e.uz = 0.0
 
 plasma_e.do_continuous_injection = 0
 plasma_e.density_min = 1E0
@@ -113,14 +98,8 @@ plasma_p.momentum_distribution_type = parse_momentum_function
 ## Inject stationary pairs
 plasma_p.momentum_function_ux(x,y,z) = "0.0"
 plasma_p.momentum_function_uy(x,y,z) = "0.0"
-
 ## uz is always 0 for the injection methods above
 plasma_p.momentum_function_uz(x,y,z) = "0.0"
-
-#plasma_p.momentum_distribution_type = "constant"
-#plasma_p.ux = 0.0
-#plasma_p.uy = 0.0
-#plasma_p.uz = 0.0
 
 plasma_p.do_continuous_injection = 0
 plasma_p.density_min = 1E0
@@ -136,17 +115,17 @@ plt.fields_to_plot = Ex Ey Ez Bx By Bz jx jy jz part_per_cell rho divE
 #################################
 pulsar.pulsarType = "dead"             # [dead/active]: sets particle injection type
 pulsar.omega_star = 6245.676               # angular velocity of NS (rad/s)
-pulsar.ramp_omega_time = 0.0              # time over which to ramp up NS angular velocity (s)
-#pulsar.ramp_omega_time = 2e-4              # time over which to ramp up NS angular velocity (s)
+pulsar.ramp_omega_time = 2.e-4              # time over which to ramp up NS angular velocity (s)
                                            # if ramp_omega_time < 0, omega = omega_star for any t
                                            # consistency requires ramp_omega_time = my_constants.to
 pulsar.center_star = 90000 90000 90000
 pulsar.R_star = 12032                  # radius of NS (m)
 pulsar.B_star = 8.0323e-6                  # magnetic field of NS (T)
-pulsar.dR = 1075
+pulsar.dR = 1406                       # thickness on the surface of the pulsar
+                                       # consistency requires dR = my_constants.dR
 pulsar.verbose = 0                     # [0/1]: turn on verbosity for debugging print statements
 pulsar.EB_external = 1                 # [0/1]: to apply external E and B
-pulsar.E_external_monopole = 0                  # [0/1]
+pulsar.E_external_monopole = 1                  # [0/1]
 pulsar.max_ndens = 5.54e6              # max ndens == ndens used in initializing density
 pulsar.Ninj_fraction = 0.1            # fraction of sigma injected
 pulsar.rhoGJ_scale = 1e0              # scaling down of rho_GJ

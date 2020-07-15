@@ -139,10 +139,18 @@ struct InjectorPosition
     bool
     insidePulsarBounds (amrex::Real r, amrex::Real R_star, amrex::Real dR_star) const noexcept
     {
-    //    return (r>=R_star and r<=(R_star+dR_star));
         return (r<=R_star and r>=(R_star-dR_star));
     }
 #endif
+    // bool: whether the region defined by lo and hi overaps with the plasma region
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    bool
+    overlapsWith (const amrex::XDim3& lo, const amrex::XDim3& hi) const noexcept
+    {
+        return ! (   (xmin > hi.x) || (xmax < lo.x)
+                  || (ymin > hi.y) || (ymax < lo.y)
+                  || (zmin > hi.z) || (zmax < lo.z) );
+    }
 
 private:
     enum struct Type { random, regular };

@@ -37,9 +37,59 @@
 #include <sstream>
 #include <string>
 
-
-
 using namespace amrex;
+
+namespace
+{
+    // Since the user provides the density distribution
+    // at t_lab=0 and in the lab-frame coordinates,
+    // we need to find the lab-frame position of this
+    // particle at t_lab=0, from its boosted-frame coordinates
+    // Assuming ballistic motion, this is given by:
+    // z0_lab = gamma*( z_boost*(1-beta*betaz_lab) - ct_boost*(betaz_lab-beta) )
+    // where betaz_lab is the speed of the particle in the lab frame
+    //
+    // In order for this equation to be solvable, betaz_lab
+    // is explicitly assumed to have no dependency on z0_lab
+    //
+    // Note that we use the bulk momentum to perform the ballistic correction
+    // Assume no z0_lab dependency
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    Real applyBallisticCorrection(const XDim3& pos, const InjectorMomentum* inj_mom,
+                                  Real gamma_boost, Real beta_boost, Real t) noexcept
+    {
+        const XDim3 u_bulk = inj_mom->getBulkMomentum(pos.x, pos.y, pos.z);
+        const Real gamma_bulk = std::sqrt(1._rt +
+                  (u_bulk.x*u_bulk.x+u_bulk.y*u_bulk.y+u_bulk.z*u_bulk.z));
+        const Real betaz_bulk = u_bulk.z/gamma_bulk;
+        const Real z0 = gamma_boost * ( pos.z*(1.0_rt-beta_boost*betaz_bulk)
+                             - PhysConst::c*t*(betaz_bulk-beta_boost) );
+        return z0;
+    }
+
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    XDim3 getCellCoords (const GpuArray<Real, AMREX_SPACEDIM>& lo_corner,
+                         const GpuArray<Real, AMREX_SPACEDIM>& dx,
+                         const XDim3& r, const IntVect& iv) noexcept
+    {
+        XDim3 pos;
+#if (AMREX_SPACEDIM == 3)
+        pos.x = lo_corner[0] + (iv[0]+r.x)*dx[0];
+        pos.y = lo_corner[1] + (iv[1]+r.y)*dx[1];
+        pos.z = lo_corner[2] + (iv[2]+r.z)*dx[2];
+#else
+        pos.x = lo_corner[0] + (iv[0]+r.x)*dx[0];
+        pos.y = 0.0_rt;
+#if   defined WARPX_DIM_XZ
+        pos.z = lo_corner[1] + (iv[1]+r.y)*dx[1];
+#elif defined WARPX_DIM_RZ
+        // Note that for RZ, r.y will be theta
+        pos.z = lo_corner[1] + (iv[1]+r.z)*dx[1];
+#endif
+#endif
+        return pos;
+    }
+}
 
 PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int ispecies,
                                                       const std::string& name)
@@ -189,11 +239,11 @@ void PhysicalParticleContainer::MapParticletoBoostedFrame (
     Real zpr = WarpX::gamma_boost*z - uz_boost*t_lab;
 
     // transform u and gamma to the boosted frame
-    Real gamma_lab = std::sqrt(1. + (u[0]*u[0] + u[1]*u[1] + u[2]*u[2])/(PhysConst::c*PhysConst::c));
+    Real gamma_lab = std::sqrt(1._rt + (u[0]*u[0] + u[1]*u[1] + u[2]*u[2])/(PhysConst::c*PhysConst::c));
     // u[0] = u[0];
     // u[1] = u[1];
     u[2] = WarpX::gamma_boost*u[2] - uz_boost*gamma_lab;
-    Real gammapr = std::sqrt(1. + (u[0]*u[0] + u[1]*u[1] + u[2]*u[2])/(PhysConst::c*PhysConst::c));
+    Real gammapr = std::sqrt(1._rt + (u[0]*u[0] + u[1]*u[1] + u[2]*u[2])/(PhysConst::c*PhysConst::c));
 
     Real vxpr = u[0]/gammapr;
     Real vypr = u[1]/gammapr;
@@ -243,7 +293,7 @@ PhysicalParticleContainer::AddGaussianBeam (
             npart /= 4;
         }
         for (long i = 0; i < npart; ++i) {
-#if (defined WARPX_DIM_3D) || (WARPX_DIM_RZ)
+#if (defined WARPX_DIM_3D) || (defined WARPX_DIM_RZ)
             const Real weight = q_tot/(npart*charge);
             const Real x = distx(mt);
             const Real y = disty(mt);
@@ -251,7 +301,7 @@ PhysicalParticleContainer::AddGaussianBeam (
 #elif (defined WARPX_DIM_XZ)
             const Real weight = q_tot/(npart*charge*y_rms);
             const Real x = distx(mt);
-            constexpr Real y = 0.;
+            constexpr Real y = 0._prt;
             const Real z = distz(mt);
 #endif
             if (plasma_injector->insideBounds(x, y, z)  &&
@@ -332,7 +382,7 @@ PhysicalParticleContainer::AddPlasmaFromFile(ParticleReal q_tot,
         double const momentum_unit_x = ps["momentum"]["x"].unitSI();
         std::shared_ptr<ParticleReal> ptr_uz = ps["momentum"]["z"].loadChunk<ParticleReal>();
         double const momentum_unit_z = ps["momentum"]["z"].unitSI();
-#   ifdef WARPX_DIM_3D
+#   ifndef WARPX_DIM_XZ
         std::shared_ptr<ParticleReal> ptr_y = ps["position"]["y"].loadChunk<ParticleReal>();
         double const position_unit_y = ps["position"]["y"].unitSI();
 #   endif
@@ -365,10 +415,10 @@ PhysicalParticleContainer::AddPlasmaFromFile(ParticleReal q_tot,
         for (auto i = decltype(npart){0}; i<npart; ++i){
             ParticleReal const x = ptr_x.get()[i]*position_unit_x;
             ParticleReal const z = ptr_z.get()[i]*position_unit_z+z_shift;
-#   ifndef WARPX_DIM_3D
-            ParticleReal const y = 0.0_prt;
-#   else
+#   if (defined WARPX_DIM_3D) || (defined WARPX_DIM_RZ)
             ParticleReal const y = ptr_y.get()[i]*position_unit_y;
+#   else
+            ParticleReal const y = 0.0_prt;
 #   endif
             if (plasma_injector->insideBounds(x, y, z)) {
                 ParticleReal const ux = ptr_ux.get()[i]*momentum_unit_x/PhysConst::m_e;
@@ -468,24 +518,10 @@ PhysicalParticleContainer::AddParticles (int lev)
     }
 }
 
-/**
- * Create new macroparticles for this species, with a fixed
- * number of particles per cell (in the cells of `part_realbox`).
- * The new particles are only created inside the intersection of `part_realbox`
- * with the local grid for the current proc.
- * @param lev the index of the refinement level
- * @param part_realbox the box in which new particles should be created
- * (this box should correspond to an integer number of cells in each direction,
- * but its boundaries need not be aligned with the actual cells of the simulation)
- */
 void
 PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
 {
     WARPX_PROFILE("PhysicalParticleContainer::AddPlasma");
-
-#ifdef PULSAR
-    amrex::Print() << " in add plasma" << PulsarParm::R_star << "\n";
-#endif
 
     // If no part_realbox is provided, initialize particles in the whole domain
     const Geometry& geom = Geom(lev);
@@ -606,36 +642,66 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
 
         const int grid_id = mfi.index();
         const int tile_id = mfi.LocalTileIndex();
+        const GpuArray<Real,AMREX_SPACEDIM> overlap_corner
+            {AMREX_D_DECL(overlap_realbox.lo(0),
+                          overlap_realbox.lo(1),
+                          overlap_realbox.lo(2))};
 
-        // Max number of new particles, if particles are created in the whole
-        // overlap_box. All of them are created, and invalid ones are then
-        // discaded
-        int max_new_particles = overlap_box.numPts() * num_ppc;
-
-        // If refine injection, build pointer dp_cellid that holds pointer to
-        // array of refined cell IDs.
-        Vector<int> cellid_v;
-        if (refine_injection and lev == 0)
+        // count the number of particles that each cell in overlap_box could add
+        Gpu::DeviceVector<int> counts(overlap_box.numPts()+1, 0);
+        Gpu::DeviceVector<int> offset(overlap_box.numPts()+1, 0);
+        auto pcounts = counts.data();
+        int lrrfac = rrfac;
+        int lrefine_injection = refine_injection;
+        Box lfine_box = fine_injection_box;
+        amrex::ParallelFor(overlap_box, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
-            // then how many new particles will be injected is not that simple
-            // We have to shift fine_injection_box because overlap_box has been shifted.
-            Box fine_overlap_box = overlap_box & amrex::shift(fine_injection_box,shifted);
-            if (fine_overlap_box.ok()) {
-                max_new_particles += fine_overlap_box.numPts() * num_ppc
-                    * (AMREX_D_TERM(rrfac,*rrfac,*rrfac)-1);
-                for (int icell = 0, ncells = overlap_box.numPts(); icell < ncells; ++icell) {
-                    IntVect iv = overlap_box.atOffset(icell);
-                    int r = (fine_overlap_box.contains(iv)) ? AMREX_D_TERM(rrfac,*rrfac,*rrfac) : 1;
-                    for (int ipart = 0; ipart < r; ++ipart) {
-                        cellid_v.push_back(icell);
-                        cellid_v.push_back(ipart);
+            IntVect iv(AMREX_D_DECL(i, j, k));
+            auto lo = getCellCoords(overlap_corner, dx, {0._rt, 0._rt, 0._rt}, iv);
+            auto hi = getCellCoords(overlap_corner, dx, {1._rt, 1._rt, 1._rt}, iv);
+
+            lo.z = applyBallisticCorrection(lo, inj_mom, gamma_boost, beta_boost, t);
+            hi.z = applyBallisticCorrection(hi, inj_mom, gamma_boost, beta_boost, t);
+#ifdef PULSAR
+            amrex::Real xc = PulsarParm::center_star[0];
+            amrex::Real yc = PulsarParm::center_star[1];
+            amrex::Real zc = PulsarParm::center_star[2];
+            amrex::Real x, y, z;
+            if (lo.x <= xc) x = lo.x;
+            if (lo.y <= yc) y = lo.y;
+            if (lo.z <= zc) z = lo.z;
+            if (hi.x >= xc) x = hi.x;
+            if (hi.y >= yc) y = hi.y;
+            if (hi.z >= zc) z = hi.z;
+            amrex::Real rad = std::sqrt( (x-xc)*(x-xc) + (y-yc)*(y-yc) + (z-zc)*(z-zc));
+            amrex::Real rstar = PulsarParm::R_star ;
+            if (inj_pos->insidePulsarBounds(rad,rstar,PulsarParm::dR_star*1.2)) {
+#else
+            if (inj_pos->overlapsWith(lo, hi)) {
+#endif
+                auto index = overlap_box.index(iv);
+                if (lrefine_injection) {
+                    Box fine_overlap_box = overlap_box & amrex::shift(lfine_box, shifted);
+                    if (fine_overlap_box.ok()) {
+                        int r = (fine_overlap_box.contains(iv)) ?
+                            AMREX_D_TERM(lrrfac,*lrrfac,*lrrfac) : 1;
+                        pcounts[index] = num_ppc*r;
                     }
+                } else {
+                    pcounts[index] = num_ppc;
                 }
             }
-        }
-        int const* hp_cellid = (cellid_v.empty()) ? nullptr : cellid_v.data();
-        amrex::AsyncArray<int> cellid_aa(hp_cellid, cellid_v.size());
-        int const* dp_cellid = cellid_aa.data();
+        });
+        Gpu::exclusive_scan(counts.begin(), counts.end(), offset.begin());
+
+        // Max number of new particles. All of them are created,
+        // and invalid ones are then discarded
+        int max_new_particles;
+#ifdef AMREX_USE_GPU
+        Gpu::dtoh_memcpy(&max_new_particles, offset.dataPtr()+overlap_box.numPts(), sizeof(int));
+#else
+        std::memcpy(&max_new_particles, offset.dataPtr()+overlap_box.numPts(), sizeof(int));
+#endif
 
         // Update NextID to include particles created in this function
         int pid;
@@ -646,6 +712,9 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
             pid = ParticleType::NextID();
             ParticleType::NextID(pid+max_new_particles);
         }
+        WarpXUtilMsg::AlwaysAssert(static_cast<int>(pid + max_new_particles) > 0,
+                                   "ERROR: overflow on particle id numbers");
+
         const int cpuid = ParallelDescriptor::MyProc();
 
         auto& particle_tile = GetParticles(lev)[std::make_pair(grid_id,tile_id)];
@@ -699,13 +768,6 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
         }
 #endif
 
-        const GpuArray<Real,AMREX_SPACEDIM> overlap_corner
-            {AMREX_D_DECL(overlap_realbox.lo(0),
-                          overlap_realbox.lo(1),
-                          overlap_realbox.lo(2))};
-
-        int lrrfac = rrfac;
-
         bool loc_do_field_ionization = do_field_ionization;
         int loc_ionization_initial_level = ionization_initial_level;
 #ifdef PULSAR
@@ -725,307 +787,258 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
         amrex::Array4<const amrex::Real> const& ez_arr = Ez_fab.array();
         amrex::Array4<const amrex::Real> const& rho_arr = rho_fab.array();
         const Real q_pm = this->charge;
-        //amrex::Print() << " box " << x_box << "\n";
-        //FArrayBox Ey_fab = Ey_mf[mfi];
-        //Box Ey_box = Ey_fab.validbox();
-        //FArrayBox Ez_fab = Ez_mf[mfi];
-        //Box Ez_box = Ez_fab.validbox();
-        //amrex::Print() << " Ey box " << Ey_box << "\n";
-        //amrex::Print() << " Ez box " << Ez_box << "\n";
 #endif
 
         // Loop over all new particles and inject them (creates too many
         // particles, in particular does not consider xmin, xmax etc.).
         // The invalid ones are given negative ID and are deleted during the
         // next redistribute.
-        amrex::For(max_new_particles, [=] AMREX_GPU_DEVICE (int ip) noexcept
+        const auto poffset = offset.data();
+        amrex::For(overlap_box, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
-            ParticleType& p = pp[ip];
-            p.id() = pid+ip;
-            p.cpu() = cpuid;
-            // no particles are introduced at timestep 0
-            if (t == 0) {
-               p.id() = -1;
-               return;
-            }
+            IntVect iv = IntVect(AMREX_D_DECL(i, j, k));
+            const auto index = overlap_box.index(iv);
+            for (int i_part = 0; i_part < pcounts[index]; ++i_part)
+            {
+                long ip = poffset[index] + i_part;
+                ParticleType& p = pp[ip];
+                p.id() = pid+ip;
+                p.cpu() = cpuid;
 
-            int cellid, i_part;
-            Real fac;
-            if (dp_cellid == nullptr) {
-                cellid = ip/num_ppc;
-                i_part = ip - cellid*num_ppc;
-                fac = 1.0;
-            } else {
-                cellid = dp_cellid[2*ip];
-                i_part = dp_cellid[2*ip+1];
-                fac = lrrfac;
-            }
-
-            IntVect iv = overlap_box.atOffset(cellid);
-
-            const XDim3 r =
-                inj_pos->getPositionUnitBox(i_part, static_cast<int>(fac));
-#if (AMREX_SPACEDIM == 3)
-            Real x = overlap_corner[0] + (iv[0]+r.x)*dx[0];
-            Real y = overlap_corner[1] + (iv[1]+r.y)*dx[1];
-            Real z = overlap_corner[2] + (iv[2]+r.z)*dx[2];
-#else
-            Real x = overlap_corner[0] + (iv[0]+r.x)*dx[0];
-            Real y = 0.0;
-#if   defined WARPX_DIM_XZ
-            Real z = overlap_corner[1] + (iv[1]+r.y)*dx[1];
-#elif defined WARPX_DIM_RZ
-            // Note that for RZ, r.y will be theta
-            Real z = overlap_corner[1] + (iv[1]+r.z)*dx[1];
-#endif
-#endif
+                const XDim3 r =
+                    inj_pos->getPositionUnitBox(i_part, lrrfac);
+                auto pos = getCellCoords(overlap_corner, dx, r, iv);
 
 #if (AMREX_SPACEDIM == 3)
-            if (!tile_realbox.contains(XDim3{x,y,z})) {
-                p.id() = -1;
-                return;
-            }
+                if (!tile_realbox.contains(XDim3{pos.x,pos.y,pos.z})) {
+                    p.id() = -1;
+                    continue;
+                }
 #else
-            if (!tile_realbox.contains(XDim3{x,z,0.0})) {
-                p.id() = -1;
-                return;
-            }
+                if (!tile_realbox.contains(XDim3{pos.x,pos.z,0.0_rt})) {
+                    p.id() = -1;
+                    continue;
+                }
 #endif
 
-            // Save the x and y values to use in the insideBounds checks.
-            // This is needed with WARPX_DIM_RZ since x and y are modified.
-            Real xb = x;
-            Real yb = y;
+                // Save the x and y values to use in the insideBounds checks.
+                // This is needed with WARPX_DIM_RZ since x and y are modified.
+                Real xb = pos.x;
+                Real yb = pos.y;
 
 #ifdef WARPX_DIM_RZ
-            // Replace the x and y, setting an angle theta.
-            // These x and y are used to get the momentum and density
-            Real theta;
-            if (nmodes == 1) {
-                // With only 1 mode, the angle doesn't matter so
-                // choose it randomly.
-                theta = 2.*MathConst::pi*amrex::Random();
-            } else {
-                theta = 2.*MathConst::pi*r.y;
-            }
-            x = xb*std::cos(theta);
-            y = xb*std::sin(theta);
+                // Replace the x and y, setting an angle theta.
+                // These x and y are used to get the momentum and density
+                Real theta;
+                if (nmodes == 1) {
+                    // With only 1 mode, the angle doesn't matter so
+                    // choose it randomly.
+                    theta = 2._rt*MathConst::pi*amrex::Random();
+                } else {
+                    theta = 2._rt*MathConst::pi*r.y;
+                }
+                pos.x = xb*std::cos(theta);
+                pos.y = xb*std::sin(theta);
 #endif
 
-            Real dens;
-            XDim3 u;
-            if (gamma_boost == 1.) {
-                // Lab-frame simulation
-                // If the particle is not within the species's
-                // xmin, xmax, ymin, ymax, zmin, zmax, go to
-                // the next generated particle.
+                Real dens;
+                XDim3 u;
+                if (gamma_boost == 1._rt) {
+                    // Lab-frame simulation
+                    // If the particle is not within the species's
+                    // xmin, xmax, ymin, ymax, zmin, zmax, go to
+                    // the next generated particle.
 
-                // include ballistic correction for plasma species with bulk motion
-                const XDim3 u_bulk = inj_mom->getBulkMomentum(x, y, z);
-                const Real gamma_bulk = std::sqrt(1.+(u_bulk.x*u_bulk.x+u_bulk.y*u_bulk.y+u_bulk.z*u_bulk.z));
-                const Real betaz_bulk = u_bulk.z/gamma_bulk;
-                const Real z0 = z - PhysConst::c*t*betaz_bulk;
-                if (!inj_pos->insideBounds(xb, yb, z0)) {
-                    p.id() = -1;
-                    return;
-                }
+                    // include ballistic correction for plasma species with bulk motion
+                    const Real z0 = applyBallisticCorrection(pos, inj_mom, gamma_boost,
+                                                             beta_boost, t);
+                    if (!inj_pos->insideBounds(xb, yb, z0)) {
+                        p.id() = -1;
+                        continue;
+                    }
 #ifdef PULSAR
-                amrex::Real xc = PulsarParm::center_star[0];
-                amrex::Real yc = PulsarParm::center_star[1];
-                amrex::Real zc = PulsarParm::center_star[2];
-                amrex::Real rad = std::sqrt( (x-xc)*(x-xc) + (y-yc)*(y-yc) + (z0-zc)*(z0-zc));
-                if (!inj_pos->insidePulsarBounds(rad,PulsarParm::R_star,PulsarParm::dR_star)) {
-                   p.id() = -1;
-                   return;
-                }
-                // get cell center
-                amrex::Real cc_x = overlap_corner[0] + iv[0]*dx[0] + 0.5*dx[0] ;
-                amrex::Real cc_y = overlap_corner[1] + iv[1]*dx[1] + 0.5*dx[1] ;
-                amrex::Real cc_z = overlap_corner[2] + iv[2]*dx[2] + 0.5*dx[2] ;
-                // get spherical r, theta, phi
-                amrex::Real cc_rad = std::sqrt(  (cc_x-xc)*(cc_x-xc)
-                                               + (cc_y-yc)*(cc_y-yc)
-                                               + (cc_z-zc)*(cc_z-zc));
-                amrex::Real r_cl = std::sqrt(  (cc_x-xc)*(cc_x-xc)
-                                               + (cc_y-yc)*(cc_y-yc));
-                amrex::Real cc_theta = 0;
-                if (cc_rad > 0 ) {
-                    cc_theta = std::acos((cc_z-zc)/cc_rad);
-                }
-                amrex::Real cc_phi = std::atan2((cc_y-yc),(cc_x-xc));
-                const amrex::Real c_theta = (cc_z-zc)/cc_rad;
-                const amrex::Real s_theta = r_cl/cc_rad;
-                amrex::Real c_phi = 0;
-                amrex::Real s_phi = 0;
-                if (r_cl > 0) {
-                    c_phi = (cc_x-xc)/r_cl;
-                    s_phi = (cc_y-yc)/r_cl;
-                }
+                    amrex::Real xc = PulsarParm::center_star[0];
+                    amrex::Real yc = PulsarParm::center_star[1];
+                    amrex::Real zc = PulsarParm::center_star[2];
+                    amrex::Real rad = std::sqrt( (xb-xc)*(xb-xc) + (yb-yc)*(yb-yc) + (z0-zc)*(z0-zc));
+                    if (!inj_pos->insidePulsarBounds(rad,PulsarParm::R_star,PulsarParm::dR_star)) {
+                       p.id() = -1;
+                       continue;
+                    }
+                    // get cell center
+                    amrex::Real cc_x = overlap_corner[0] + iv[0]*dx[0] + 0.5*dx[0] ;
+                    amrex::Real cc_y = overlap_corner[1] + iv[1]*dx[1] + 0.5*dx[1] ;
+                    amrex::Real cc_z = overlap_corner[2] + iv[2]*dx[2] + 0.5*dx[2] ;
+                    // get spherical r, theta, phi
+                    amrex::Real cc_rad = std::sqrt(  (cc_x-xc)*(cc_x-xc)
+                                                   + (cc_y-yc)*(cc_y-yc)
+                                                   + (cc_z-zc)*(cc_z-zc));
+                    amrex::Real r_cl = std::sqrt(  (cc_x-xc)*(cc_x-xc)
+                                                   + (cc_y-yc)*(cc_y-yc));
+                    amrex::Real cc_theta = 0;
+                    if (cc_rad > 0 ) {
+                        cc_theta = std::acos((cc_z-zc)/cc_rad);
+                    }
+                    amrex::Real cc_phi = std::atan2((cc_y-yc),(cc_x-xc));
+                    const amrex::Real c_theta = (cc_z-zc)/cc_rad;
+                    const amrex::Real s_theta = r_cl/cc_rad;
+                    amrex::Real c_phi = 0;
+                    amrex::Real s_phi = 0;
+                    if (r_cl > 0) {
+                        c_phi = (cc_x-xc)/r_cl;
+                        s_phi = (cc_y-yc)/r_cl;
+                    }
 
-                amrex::Real omega = PulsarParm::Omega(t);
-                amrex::Real ratio = PulsarParm::R_star/cc_rad;
-                amrex::Real r3 = ratio*ratio*ratio;
-                amrex::Real Er_cor =  PulsarParm::B_star
-                                         *omega
-                                         *cc_rad*s_theta*s_theta;
-                // Er_external is known
-                Real Er_ext = omega*PulsarParm::B_star*cc_rad*(1.0-3.0*c_theta*c_theta);
-                Er_ext += (2.0/3.0)*omega*PulsarParm::B_star*cc_rad;
-                // rho_GJ is known
-                amrex::Real rho_GJ = 2*PhysConst::ep0*PulsarParm::B_star*omega*
-                                    (1.0-3.0*c_theta*c_theta)*PulsarParm::rhoGJ_scale;
-                /// accessign efield
-                int ii = Ex_lo.x + iv[0];
-                int jj = Ex_lo.y + iv[1];
-                int kk = Ex_lo.z + iv[2];
-                Real ex_avg = 0.25*(ex_arr(ii,jj,kk) + ex_arr(ii,jj+1,kk)+ex_arr(ii,jj,kk+1) + ex_arr(ii,jj+1,kk+1));
-                Real ey_avg = 0.25*(ex_arr(ii,jj,kk) + ex_arr(ii+1,jj,kk)+ex_arr(ii,jj,kk+1) + ex_arr(ii+1,jj,kk+1));
-                Real ez_avg = 0.25*(ex_arr(ii,jj,kk) + ex_arr(ii,jj+1,kk)+ex_arr(ii+1,jj,kk) + ex_arr(ii+1,jj+1,kk));
-                Real Er_cell = ex_avg*s_theta*c_phi + ey_avg*s_theta*s_phi + ez_avg*c_theta;
+                    amrex::Real omega = PulsarParm::Omega(t);
+                    amrex::Real ratio = PulsarParm::R_star/cc_rad;
+                    amrex::Real r3 = ratio*ratio*ratio;
+                    amrex::Real Er_cor =  PulsarParm::B_star
+                                             *omega
+                                             *cc_rad*s_theta*s_theta;
+                    // Er_external is known
+                    Real Er_ext = omega*PulsarParm::B_star*cc_rad*(1.0-3.0*c_theta*c_theta);
+                    Er_ext += (2.0/3.0)*omega*PulsarParm::B_star*cc_rad;
+                    // rho_GJ is known
+                    amrex::Real rho_GJ = 2*PhysConst::ep0*PulsarParm::B_star*omega*
+                                        (1.0-3.0*c_theta*c_theta)*PulsarParm::rhoGJ_scale;
+                    /// accessign efield
+                    int ii = Ex_lo.x + iv[0];
+                    int jj = Ex_lo.y + iv[1];
+                    int kk = Ex_lo.z + iv[2];
+                    Real ex_avg = 0.25*(ex_arr(ii,jj,kk) + ex_arr(ii,jj+1,kk)+ex_arr(ii,jj,kk+1) + ex_arr(ii,jj+1,kk+1));
+                    Real ey_avg = 0.25*(ex_arr(ii,jj,kk) + ex_arr(ii+1,jj,kk)+ex_arr(ii,jj,kk+1) + ex_arr(ii+1,jj,kk+1));
+                    Real ez_avg = 0.25*(ex_arr(ii,jj,kk) + ex_arr(ii,jj+1,kk)+ex_arr(ii+1,jj,kk) + ex_arr(ii+1,jj+1,kk));
+                    Real Er_cell = ex_avg*s_theta*c_phi + ey_avg*s_theta*s_phi + ez_avg*c_theta;
 
-                // analytical surface charge density
-                Real sigma_inj = (( Er_ext - Er_cor));
-                Real max_dens = PulsarParm::max_ndens;
-                amrex::Real fraction = PulsarParm::Ninj_fraction;
-                // number of particle pairs injected
-                Real N_inj = fraction*std::abs(sigma_inj) *PhysConst::ep0* dx[0]*dx[0]/(PhysConst::q_e*max_dens*scale_fac);
-                if (t > 0) {
-                   if (N_inj >= 1) {
-                      if (N_inj < num_ppc) {
-                         int part_freq = floor(num_ppc / N_inj);
-                         if (i_part%part_freq!=0) {
-                            p.id() = -1;
-                            return;
-                         }
-                      }
-                   }
-                   else
-                   {
-                      p.id() = -1;
-                      return;
-                   }
-                   if (sigma_inj < 0 and q_pm >0) {p.id()=-1; return;}
-                   if (sigma_inj > 0 and q_pm <0) {p.id()=-1; return;}
-                   // if rho is too smal -- we dont inject particles
-                   if (std::abs(rho_GJ) < 1E-35) {
-                      p.id() = -1;
-                      return;
-                   }
-                   else {
-                      Real rel_rho_err = ((rho_arr(ii,jj,kk) - rho_GJ)/rho_GJ);
-                      // If current rho is much higher than rho_GJ, particles are not introduced.
-                      if ( rel_rho_err > 0.05) {
-                         p.id() = -1;
-                         return;
-                      }
-                   }
-                }
+                    // analytical surface charge density
+                    Real sigma_inj = (( Er_ext - Er_cor));
+                    Real max_dens = PulsarParm::max_ndens;
+                    amrex::Real fraction = PulsarParm::Ninj_fraction;
+                    // number of particle pairs injected
+                    Real N_inj = fraction*std::abs(sigma_inj) *PhysConst::ep0* dx[0]*dx[0]/(PhysConst::q_e*max_dens*scale_fac);
+                    if (t > 0) {
+                       if (N_inj >= 1) {
+                          if (N_inj < num_ppc) {
+                             int part_freq = floor(num_ppc / N_inj);
+                             if (i_part%part_freq!=0) {
+                                p.id() = -1;
+                                continue;
+                             }
+                          }
+                       }
+                       else
+                       {
+                          p.id() = -1;
+                          continue;
+                       }
+                       if (sigma_inj < 0 and q_pm >0) {p.id()=-1; continue;}
+                       if (sigma_inj > 0 and q_pm <0) {p.id()=-1; continue;}
+                       // if rho is too smal -- we dont inject particles
+                       if (std::abs(rho_GJ) < 1E-35) {
+                          p.id() = -1;
+                          continue;
+                       }
+                       else {
+                          Real rel_rho_err = ((rho_arr(ii,jj,kk) - rho_GJ)/rho_GJ);
+                          // If current rho is much higher than rho_GJ, particles are not introduced.
+                          if ( rel_rho_err > 0.05) {
+                             p.id() = -1;
+                             continue;
+                          }
+                       }
+                    }
 
 #endif
 
-                u = inj_mom->getMomentum(x, y, z0);
-                dens = inj_rho->getDensity(x, y, z0);
-                // Remove particle if density below threshold
-                if ( dens < density_min ){
-                    p.id() = -1;
-                    return;
-                }
-                // Cut density if above threshold
-                dens = amrex::min(dens, density_max);
-            } else {
-                // Boosted-frame simulation
-                // Since the user provides the density distribution
-                // at t_lab=0 and in the lab-frame coordinates,
-                // we need to find the lab-frame position of this
-                // particle at t_lab=0, from its boosted-frame coordinates
-                // Assuming ballistic motion, this is given by:
-                // z0_lab = gamma*( z_boost*(1-beta*betaz_lab) - ct_boost*(betaz_lab-beta) )
-                // where betaz_lab is the speed of the particle in the lab frame
-                //
-                // In order for this equation to be solvable, betaz_lab
-                // is explicitly assumed to have no dependency on z0_lab
-                //
-                // Note that we use the bulk momentum to perform the ballastic correction
-                const XDim3 u_bulk = inj_mom->getBulkMomentum(x, y, 0.); // No z0_lab dependency
-                // At this point u is the lab-frame momentum
-                // => Apply the above formula for z0_lab
-                const Real gamma_lab_bulk = std::sqrt(1.+(u_bulk.x*u_bulk.x+u_bulk.y*u_bulk.y+u_bulk.z*u_bulk.z));
-                const Real betaz_lab_bulk = u_bulk.z/(gamma_lab_bulk);
-                const Real z0_lab = gamma_boost * ( z*(1-beta_boost*betaz_lab_bulk)
-                                              - PhysConst::c*t*(betaz_lab_bulk-beta_boost) );
-                // If the particle is not within the lab-frame zmin, zmax, etc.
-                // go to the next generated particle.
-                if (!inj_pos->insideBounds(xb, yb, z0_lab)) {
-                    p.id() = -1;
-                    return;
-                }
-                // call `getDensity` with lab-frame parameters
-                dens = inj_rho->getDensity(x, y, z0_lab);
-                // Remove particle if density below threshold
-                if ( dens < density_min ){
-                    p.id() = -1;
-                    return;
-                }
-                // Cut density if above threshold
-                dens = amrex::min(dens, density_max);
+                    u = inj_mom->getMomentum(pos.x, pos.y, z0);
+                    dens = inj_rho->getDensity(pos.x, pos.y, z0);
 
-                // get the full momentum, including thermal motion
-                u = inj_mom->getMomentum(x, y, 0.);
-                const Real gamma_lab = std::sqrt( 1.+(u.x*u.x+u.y*u.y+u.z*u.z) );
-                const Real betaz_lab = u.z/(gamma_lab);
+                    // Remove particle if density below threshold
+                    if ( dens < density_min ){
+                        p.id() = -1;
+                        continue;
+                    }
+                    // Cut density if above threshold
+                    dens = amrex::min(dens, density_max);
+                } else {
+                    // Boosted-frame simulation
+                    const Real z0_lab = applyBallisticCorrection(pos, inj_mom, gamma_boost,
+                                                                 beta_boost, t);
 
-                // At this point u and dens are the lab-frame quantities
-                // => Perform Lorentz transform
-                dens = gamma_boost * dens * ( 1.0 - beta_boost*betaz_lab );
-                u.z = gamma_boost * ( u.z -beta_boost*gamma_lab );
-            }
+                    // If the particle is not within the lab-frame zmin, zmax, etc.
+                    // go to the next generated particle.
+                    if (!inj_pos->insideBounds(xb, yb, z0_lab)) {
+                        p.id() = -1;
+                        continue;
+                    }
+                    // call `getDensity` with lab-frame parameters
+                    dens = inj_rho->getDensity(pos.x, pos.y, z0_lab);
+                    // Remove particle if density below threshold
+                    if ( dens < density_min ){
+                        p.id() = -1;
+                        continue;
+                    }
+                    // Cut density if above threshold
+                    dens = amrex::min(dens, density_max);
 
-            if (loc_do_field_ionization) {
-                pi[ip] = loc_ionization_initial_level;
-            }
+                    // get the full momentum, including thermal motion
+                    u = inj_mom->getMomentum(pos.x, pos.y, 0._rt);
+                    const Real gamma_lab = std::sqrt( 1._rt+(u.x*u.x+u.y*u.y+u.z*u.z) );
+                    const Real betaz_lab = u.z/(gamma_lab);
+
+                    // At this point u and dens are the lab-frame quantities
+                    // => Perform Lorentz transform
+                    dens = gamma_boost * dens * ( 1.0_rt - beta_boost*betaz_lab );
+                    u.z = gamma_boost * ( u.z -beta_boost*gamma_lab );
+                }
+
+                if (loc_do_field_ionization) {
+                    pi[ip] = loc_ionization_initial_level;
+                }
 
 #ifdef WARPX_QED
-            if(loc_has_quantum_sync){
-                p_optical_depth_QSR[ip] = quantum_sync_get_opt();
-            }
+                if(loc_has_quantum_sync){
+                    p_optical_depth_QSR[ip] = quantum_sync_get_opt();
+                }
 
-            if(loc_has_breit_wheeler){
-                p_optical_depth_BW[ip] = breit_wheeler_get_opt();
-            }
+                if(loc_has_breit_wheeler){
+                    p_optical_depth_BW[ip] = breit_wheeler_get_opt();
+                }
 #endif
 
-            u.x *= PhysConst::c;
-            u.y *= PhysConst::c;
-            u.z *= PhysConst::c;
+                u.x *= PhysConst::c;
+                u.y *= PhysConst::c;
+                u.z *= PhysConst::c;
 
-            // Real weight = dens * scale_fac / (AMREX_D_TERM(fac, *fac, *fac));
-            Real weight = dens * scale_fac;
+                // Real weight = dens * scale_fac / (AMREX_D_TERM(fac, *fac, *fac));
+                Real weight = dens * scale_fac;
 #ifdef WARPX_DIM_RZ
-            if (radially_weighted) {
-                weight *= 2.*MathConst::pi*xb;
-            } else {
-                // This is not correct since it might shift the particle
-                // out of the local grid
-                x = std::sqrt(xb*rmax);
-                weight *= dx[0];
-            }
+                if (radially_weighted) {
+                    weight *= 2._rt*MathConst::pi*xb;
+                } else {
+                    // This is not correct since it might shift the particle
+                    // out of the local grid
+                    pos.x = std::sqrt(xb*rmax);
+                    weight *= dx[0];
+                }
 #endif
-            pa[PIdx::w ][ip] = weight;
-            pa[PIdx::ux][ip] = u.x;
-            pa[PIdx::uy][ip] = u.y;
-            pa[PIdx::uz][ip] = u.z;
+                pa[PIdx::w ][ip] = weight;
+                pa[PIdx::ux][ip] = u.x;
+                pa[PIdx::uy][ip] = u.y;
+                pa[PIdx::uz][ip] = u.z;
 
 #if (AMREX_SPACEDIM == 3)
-            p.pos(0) = x;
-            p.pos(1) = y;
-            p.pos(2) = z;
+                p.pos(0) = pos.x;
+                p.pos(1) = pos.y;
+                p.pos(2) = pos.z;
 #elif (AMREX_SPACEDIM == 2)
 #ifdef WARPX_DIM_RZ
-            pa[PIdx::theta][ip] = theta;
+                pa[PIdx::theta][ip] = theta;
 #endif
-            p.pos(0) = xb;
-            p.pos(1) = z;
+                p.pos(0) = xb;
+                p.pos(1) = pos.z;
 #endif
+            }
         });
 
         if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
@@ -1034,6 +1047,7 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
             wt = amrex::second() - wt;
             amrex::HostDevice::Atomic::Add( &(*cost)[mfi.index()], wt);
         }
+        amrex::Gpu::synchronize();
     }
 
     // The function that calls this is responsible for redistributing particles.
@@ -1194,6 +1208,8 @@ void
 PhysicalParticleContainer::Evolve (int lev,
                                    const MultiFab& Ex, const MultiFab& Ey, const MultiFab& Ez,
                                    const MultiFab& Bx, const MultiFab& By, const MultiFab& Bz,
+                                   const MultiFab& Ex_avg, const MultiFab& Ey_avg, const MultiFab& Ez_avg,
+                                   const MultiFab& Bx_avg, const MultiFab& By_avg, const MultiFab& Bz_avg,
                                    MultiFab& jx, MultiFab& jy, MultiFab& jz,
                                    MultiFab* cjx, MultiFab* cjy, MultiFab* cjz,
                                    MultiFab* rho, MultiFab* crho,
@@ -1201,6 +1217,11 @@ PhysicalParticleContainer::Evolve (int lev,
                                    const MultiFab* cBx, const MultiFab* cBy, const MultiFab* cBz,
                                    Real /*t*/, Real dt, DtType a_dt_type)
 {
+
+    bool fft_do_time_averaging = false;
+    ParmParse pp("psatd");
+    pp.query("do_time_averaging", fft_do_time_averaging);
+
     WARPX_PROFILE("PPC::Evolve()");
     WARPX_PROFILE_VAR_NS("PPC::GatherAndPush", blp_fg);
 
@@ -1256,12 +1277,12 @@ PhysicalParticleContainer::Evolve (int lev,
             const long np = pti.numParticles();
 
             // Data on the grid
-            FArrayBox const* exfab = &(Ex[pti]);
-            FArrayBox const* eyfab = &(Ey[pti]);
-            FArrayBox const* ezfab = &(Ez[pti]);
-            FArrayBox const* bxfab = &(Bx[pti]);
-            FArrayBox const* byfab = &(By[pti]);
-            FArrayBox const* bzfab = &(Bz[pti]);
+            FArrayBox const* exfab = fft_do_time_averaging ? &(Ex_avg[pti]) : &(Ex[pti]);
+            FArrayBox const* eyfab = fft_do_time_averaging ? &(Ey_avg[pti]) : &(Ey[pti]);
+            FArrayBox const* ezfab = fft_do_time_averaging ? &(Ez_avg[pti]) : &(Ez[pti]);
+            FArrayBox const* bxfab = fft_do_time_averaging ? &(Bx_avg[pti]) : &(Bx[pti]);
+            FArrayBox const* byfab = fft_do_time_averaging ? &(By_avg[pti]) : &(By[pti]);
+            FArrayBox const* bzfab = fft_do_time_averaging ? &(Bz_avg[pti]) : &(Bz[pti]);
 
             Elixir exeli, eyeli, ezeli, bxeli, byeli, bzeli;
 

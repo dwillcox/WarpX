@@ -247,7 +247,7 @@ namespace PulsarParm
 
 
     AMREX_GPU_HOST_DEVICE AMREX_INLINE
-    void DampEField(int i, int j, int k, amrex::GeometryData const& geom, amrex::Array4<amrex::Real> const& Efield, int const* const AMREX_RESTRICT mf_ixtype)
+    void DampField(int i, int j, int k, amrex::GeometryData const& geom, amrex::Array4<amrex::Real> const& Efield, int const* const AMREX_RESTRICT mf_ixtype)
     {
         const amrex::Real r = Spherical::r(i, j, k, geom, mf_ixtype);
         

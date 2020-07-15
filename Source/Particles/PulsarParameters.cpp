@@ -1,4 +1,5 @@
 #include "PulsarParameters.H"
+#include "WarpX.H"
 #include <AMReX_ParmParse.H>
 #include <AMReX_Print.H>
 #include <AMReX_RealVect.H>
@@ -51,6 +52,9 @@ namespace PulsarParm
         amrex::Print() << " pulsar ninj fraction " << Ninj_fraction << "\n";
         amrex::Print() << " pulsar rhoGJ scaling " << rhoGJ_scale << "\n";
         amrex::Print() << " EB_external : " << EB_external << "\n";
+        auto & warpx = WarpX::GetInstance();
+        warpx.setplot_rho(true);
+
     }
 
 }
