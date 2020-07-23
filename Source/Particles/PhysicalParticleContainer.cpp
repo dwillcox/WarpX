@@ -796,7 +796,7 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
         const auto poffset = offset.data();
         amrex::For(overlap_box, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
-            amrex::IntVect iv = amrex::IntVect(AMREX_D_DECL(i, j, k));            
+            amrex::IntVect iv = amrex::IntVect(AMREX_D_DECL(i, j, k));
             const auto index = overlap_box.index(iv);
             for (int i_part = 0; i_part < pcounts[index]; ++i_part)
             {
@@ -1254,7 +1254,7 @@ PhysicalParticleContainer::Evolve (int lev,
 #else
         int thread_num = 0;
 #endif
- 
+
         FArrayBox filtered_Ex, filtered_Ey, filtered_Ez;
         FArrayBox filtered_Bx, filtered_By, filtered_Bz;
         for (WarpXParIter pti(*this, lev); pti.isValid(); ++pti)
@@ -1264,7 +1264,7 @@ PhysicalParticleContainer::Evolve (int lev,
                 amrex::Gpu::synchronize();
             }
             Real wt = amrex::second();
-          
+
             const Box& box = pti.validbox();
             auto& attribs = pti.GetAttribs();
 
