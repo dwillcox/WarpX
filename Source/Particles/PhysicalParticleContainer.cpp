@@ -1657,7 +1657,7 @@ PhysicalParticleContainer::SplitParticles (int lev)
                 }
 #endif
                 // invalidate the particle
-                p.m_idata.id = -p.m_idata.id;
+                p.id() = -p.id();
             }
         }
     }
@@ -1722,7 +1722,7 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
 
             const Dim3 lo = lbound(box);
 
-            int l_lower_order_in_v = WarpX::l_lower_order_in_v;
+            bool galerkin_interpolation = WarpX::galerkin_interpolation;
             int nox = WarpX::nox;
             int n_rz_azimuthal_modes = WarpX::n_rz_azimuthal_modes;
 
@@ -1760,6 +1760,8 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
             const auto pusher_algo = WarpX::particle_pusher_algo;
             const auto do_crr = do_classical_radiation_reaction;
 
+            const auto t_do_not_gather = do_not_gather;
+
             amrex::ParallelFor( np, [=] AMREX_GPU_DEVICE (long ip)
             {
                 amrex::ParticleReal xp, yp, zp;
@@ -1771,12 +1773,14 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
                 amrex::ParticleReal Bxp = 0._rt, Byp = 0._rt, Bzp = 0._rt;
                 getExternalB(ip, Bxp, Byp, Bzp);
 
-                // first gather E and B to the particle positions
-                doGatherShapeN(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
-                               ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr,
-                               ex_type, ey_type, ez_type, bx_type, by_type, bz_type,
-                               dx_arr, xyzmin_arr, lo, n_rz_azimuthal_modes,
-                               nox, l_lower_order_in_v);
+                if (!t_do_not_gather){
+                    // first gather E and B to the particle positions
+                    doGatherShapeN(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
+                                   ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr,
+                                   ex_type, ey_type, ez_type, bx_type, by_type, bz_type,
+                                   dx_arr, xyzmin_arr, lo, n_rz_azimuthal_modes,
+                                   nox, galerkin_interpolation);
+                }
 
                 if (do_crr) {
                     amrex::Real qp = q;
@@ -2046,11 +2050,7 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
                                      (gather_lev==(lev  )),
                                      "Gather buffers only work for lev-1");
     // If no particles, do not do anything
-    // If do_not_gather = 1 by user, do not do anything
-    if (np_to_push == 0 || do_not_gather) return;
-//    // initializing the field value to the externally applied field before
-//    // gathering fields from the grid to the particles.
-//    AssignExternalFieldOnParticles(pti, Exp, Eyp, Ezp, Bxp, Byp, Bzp, lev);
+    if (np_to_push == 0) return;
 
     // Get cell size on gather_lev
     const std::array<Real,3>& dx = WarpX::CellSize(std::max(gather_lev,0));
@@ -2082,7 +2082,7 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
 
     const Dim3 lo = lbound(box);
 
-    int l_lower_order_in_v = WarpX::l_lower_order_in_v;
+    bool galerkin_interpolation = WarpX::galerkin_interpolation;
     int nox = WarpX::nox;
     int n_rz_azimuthal_modes = WarpX::n_rz_azimuthal_modes;
 
@@ -2138,6 +2138,8 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
     }
 #endif
 
+    const auto t_do_not_gather = do_not_gather;
+
     amrex::ParallelFor( np_to_push, [=] AMREX_GPU_DEVICE (long ip)
     {
         amrex::ParticleReal xp, yp, zp;
@@ -2149,16 +2151,18 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
         amrex::ParticleReal Bxp = 0._rt, Byp = 0._rt, Bzp = 0._rt;
         getExternalB(ip, Bxp, Byp, Bzp);
 
-        // first gather E and B to the particle positions
-        doGatherShapeN(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
-                       ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr,
-                       ex_type, ey_type, ez_type, bx_type, by_type, bz_type,
-                       dx_arr, xyzmin_arr, lo, n_rz_azimuthal_modes,
-                       nox, l_lower_order_in_v);
+        if(!t_do_not_gather){
+            // first gather E and B to the particle positions
+            doGatherShapeN(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp,
+                           ex_arr, ey_arr, ez_arr, bx_arr, by_arr, bz_arr,
+                           ex_type, ey_type, ez_type, bx_type, by_type, bz_type,
+                           dx_arr, xyzmin_arr, lo, n_rz_azimuthal_modes,
+                           nox, galerkin_interpolation);
+        }
 
         scaleFields(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp);
 
-#ifdef WARPX_WED
+#ifdef WARPX_QED
     if (local_has_quantum_sync) {
         const ParticleReal px = m * ux[ip];
         const ParticleReal py = m * uy[ip];
