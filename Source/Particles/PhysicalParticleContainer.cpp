@@ -756,7 +756,7 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
 #endif
         total_max_particles += max_new_particles;
         // Update NextID to include particles created in this function
-        int pid;
+        Long pid;
 #ifdef _OPENMP
 #pragma omp critical (add_plasma_nextid)
 #endif
@@ -764,7 +764,7 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
             pid = ParticleType::NextID();
             ParticleType::NextID(pid+max_new_particles);
         }
-        WarpXUtilMsg::AlwaysAssert(static_cast<int>(pid + max_new_particles) > 0,
+        WarpXUtilMsg::AlwaysAssert(static_cast<Long>(pid + max_new_particles) < LastParticleID,
                                    "ERROR: overflow on particle id numbers");
 
         const int cpuid = ParallelDescriptor::MyProc();
@@ -786,7 +786,7 @@ PhysicalParticleContainer::AddPlasma (int lev, RealBox part_realbox)
             pa[ia] = soa.GetRealData(ia).data() + old_size;
         }
 
-        int* pi;
+        int* pi = nullptr;
         if (do_field_ionization) {
             pi = soa.GetIntData(particle_icomps["ionization_level"]).data() + old_size;
         }
@@ -1724,10 +1724,7 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
                 getPosition(ip, xp, yp, zp);
 
                 amrex::ParticleReal Exp = 0._rt, Eyp = 0._rt, Ezp = 0._rt;
-                getExternalE(ip, Exp, Eyp, Ezp);
-
                 amrex::ParticleReal Bxp = 0._rt, Byp = 0._rt, Bzp = 0._rt;
-                getExternalB(ip, Bxp, Byp, Bzp);
 
                 if (!t_do_not_gather){
                     // first gather E and B to the particle positions
@@ -1737,6 +1734,10 @@ PhysicalParticleContainer::PushP (int lev, Real dt,
                                    dx_arr, xyzmin_arr, lo, n_rz_azimuthal_modes,
                                    nox, galerkin_interpolation);
                 }
+                // Externally applied E-field in Cartesian co-ordinates
+                getExternalE(ip, Exp, Eyp, Ezp);
+                // Externally applied B-field in Cartesian co-ordinates
+                getExternalB(ip, Bxp, Byp, Bzp);
 
                 if (do_crr) {
                     amrex::Real qp = q;
@@ -2102,10 +2103,7 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
         getPosition(ip, xp, yp, zp);
 
         amrex::ParticleReal Exp = 0._rt, Eyp = 0._rt, Ezp = 0._rt;
-        getExternalE(ip, Exp, Eyp, Ezp);
-
         amrex::ParticleReal Bxp = 0._rt, Byp = 0._rt, Bzp = 0._rt;
-        getExternalB(ip, Bxp, Byp, Bzp);
 
         if(!t_do_not_gather){
             // first gather E and B to the particle positions
@@ -2115,6 +2113,10 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
                            dx_arr, xyzmin_arr, lo, n_rz_azimuthal_modes,
                            nox, galerkin_interpolation);
         }
+        // Externally applied E-field in Cartesian co-ordinates
+        getExternalE(ip, Exp, Eyp, Ezp);
+        // Externally applied B-field in Cartesian co-ordinates
+        getExternalB(ip, Bxp, Byp, Bzp);
 
         scaleFields(xp, yp, zp, Exp, Eyp, Ezp, Bxp, Byp, Bzp);
 
