@@ -197,15 +197,15 @@ WarpX::Evolve (int numsteps)
                     amrex::ParallelFor(tex, tey, tez,
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-                        PulsarParm::DampField(i, j, k, geom, Exfab, Ex_stag_ptr);
+//                        PulsarParm::DampField(i, j, k, geom, Exfab, Ex_stag_ptr);
                     },
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-                        PulsarParm::DampField(i, j, k, geom, Eyfab, Ey_stag_ptr);
+//                        PulsarParm::DampField(i, j, k, geom, Eyfab, Ey_stag_ptr);
                     },
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-                        PulsarParm::DampField(i, j, k, geom, Ezfab, Ez_stag_ptr);
+//                        PulsarParm::DampField(i, j, k, geom, Ezfab, Ez_stag_ptr);
                     });
                 }
                 for ( MFIter mfi(*Bx, TilingIfNotGPU()); mfi.isValid(); ++mfi )
@@ -221,15 +221,15 @@ WarpX::Evolve (int numsteps)
                     amrex::ParallelFor(tex, tey, tez,
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-                        PulsarParm::DampField(i, j, k, geom, Bxfab, Bx_stag_ptr);
+//                        PulsarParm::DampField(i, j, k, geom, Bxfab, Bx_stag_ptr);
                     },
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-                        PulsarParm::DampField(i, j, k, geom, Byfab, By_stag_ptr);
+//                        PulsarParm::DampField(i, j, k, geom, Byfab, By_stag_ptr);
                     },
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-                        PulsarParm::DampField(i, j, k, geom, Bzfab, Bz_stag_ptr);
+//                        PulsarParm::DampField(i, j, k, geom, Bzfab, Bz_stag_ptr);
                     });
                 }
             }
@@ -434,10 +434,14 @@ WarpX::OneStep_nosub (Real cur_time)
     if (do_pml && pml_has_particles) CopyJPML();
     if (do_pml && do_pml_j_damping) DampJPML();
 
+#ifdef PULSAR
+    ApplyPulsarEBFieldsOnGrid();
+#endif        
     if (!do_electrostatic) {
     // Electromagnetic solver:
     // Push E and B from {n} to {n+1}
     // (And update guard cells immediately afterwards)
+
 #ifdef WARPX_USE_PSATD
         if (use_hybrid_QED)
         {
@@ -456,6 +460,7 @@ WarpX::OneStep_nosub (Real cur_time)
         }
         if (do_pml) DampPML();
 #else
+
         EvolveF(0.5*dt[0], DtType::FirstHalf);
         FillBoundaryF(guard_cells.ng_FieldSolverF);
         EvolveB(0.5*dt[0]); // We now have B^{n+1/2}
