@@ -197,15 +197,15 @@ WarpX::Evolve (int numsteps)
                     amrex::ParallelFor(tex, tey, tez,
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-//                        PulsarParm::DampField(i, j, k, geom, Exfab, Ex_stag_ptr);
+                        PulsarParm::DampField(i, j, k, geom, Exfab, Ex_stag_ptr);
                     },
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-//                        PulsarParm::DampField(i, j, k, geom, Eyfab, Ey_stag_ptr);
+                        PulsarParm::DampField(i, j, k, geom, Eyfab, Ey_stag_ptr);
                     },
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-//                        PulsarParm::DampField(i, j, k, geom, Ezfab, Ez_stag_ptr);
+                        PulsarParm::DampField(i, j, k, geom, Ezfab, Ez_stag_ptr);
                     });
                 }
                 for ( MFIter mfi(*Bx, TilingIfNotGPU()); mfi.isValid(); ++mfi )
@@ -221,15 +221,15 @@ WarpX::Evolve (int numsteps)
                     amrex::ParallelFor(tex, tey, tez,
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-//                        PulsarParm::DampField(i, j, k, geom, Bxfab, Bx_stag_ptr);
+                        PulsarParm::DampField(i, j, k, geom, Bxfab, Bx_stag_ptr);
                     },
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-//                        PulsarParm::DampField(i, j, k, geom, Byfab, By_stag_ptr);
+                        PulsarParm::DampField(i, j, k, geom, Byfab, By_stag_ptr);
                     },
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-//                        PulsarParm::DampField(i, j, k, geom, Bzfab, Bz_stag_ptr);
+                        PulsarParm::DampField(i, j, k, geom, Bzfab, Bz_stag_ptr);
                     });
                 }
             }
