@@ -436,7 +436,7 @@ WarpX::OneStep_nosub (Real cur_time)
 
 //#ifdef PULSAR
 //    ApplyPulsarEBFieldsOnGrid();
-//#endif        
+//#endif
     if (!do_electrostatic) {
     // Electromagnetic solver:
     // Push E and B from {n} to {n+1}
